@@ -12,8 +12,8 @@ const StatusCodes = {
 }
 
 const RequiredFields = {
-    PUBLISH_LOAD: ["from", "to", "loadType", "amount", "phoneNo", "scheduleDate"],
-    SEARCH_LOAD: ["from", "to", "scheduleDate"],
+    PUBLISH_LOAD: ["fromAddress","fromLat" ,"fromLng", "toAddress","toLat" ,"toLng" ,"loadType", "amount", "phoneNo", "scheduleDate"],
+    SEARCH_LOAD: ["fromCoords", "toCoords", "scheduleDate"],
     SEND_OTP: ["phone"],
     VERIFY_OTP: ["phone", "otp"]
 }
@@ -50,7 +50,12 @@ const CommonMessages = {
     JWT_INVALID_AUTH:"Invalid Authorization format",
     JWT_VERIFY:"JWT Verification Failed",
     JWT_SERVER:"JWT Server Error:",
-    PROFILE_UPDATED:"Profile Updated Successfully"
+    PROFILE_UPDATED:"Profile Updated Successfully",
+    FROM_COORDS_ERROR:"Fromcoords length must be equal to 2",
+    TO_COORDS_ERROR:"Tocoords length must be equal to 2",
+    FROM_RADIUS:50000,
+    TO_RADIUS:50000,
+    EARTH_RADIUS:6378137 
 
 }
 

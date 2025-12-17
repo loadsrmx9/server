@@ -91,7 +91,7 @@ router.post('/verifyOTP', async (req, res) => {
             id: findUser._id
         }
         const accessToken = jwt.sign(payLoad, process.env.JWT_KEY, { expiresIn: '29d' })
-        return res.status(StatusCodes.OK).json({status:CommonMessages.TRUE,message: CommonMessages.LOGIN_SUCCESS ,data:accessToken})
+        return res.status(StatusCodes.OK).json({status:CommonMessages.TRUE,message: CommonMessages.LOGIN_SUCCESS ,data:{accessToken}})
     } catch (err) {
         console.error(CommonMessages.VERIFY_OTP_API, err);
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({status:CommonMessages.FALSE, error:CommonMessages.LOGIN_FAILED });

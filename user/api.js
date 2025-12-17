@@ -56,32 +56,68 @@ router.patch('/updateProfile', jwtAuth, upload.single("profileImage"), async (re
 // =======================
 // POST PUBLISH LOAD
 // =======================
-router.post('/publishLoad', jwtAuth, async (req, res) => {
+router.post("/publishLoad", jwtAuth, async (req, res) => {
     try {
-        const { errors, scheduleUTC, expireAt } = await ValidateLoadInput(req.body, RequiredFields.PUBLISH_LOAD);
+
+        const { errors, scheduleUTC, expireAt } =
+            await ValidateLoadInput(req.body, RequiredFields.PUBLISH_LOAD);
 
         if (Object.keys(errors).length > 0) {
-            return res.status(StatusCodes.BAD_REQUEST).json({ status: CommonMessages.FALSE, errors });
+            return res.status(StatusCodes.BAD_REQUEST).json({
+                status: CommonMessages.FALSE,
+                errors
+            });
         }
-
         const userInfo = await UserData.findById(req.id).lean();
 
         const newLoad = await PublishLoad.create({
-            ...req.body,
             userId: req.id,
             userPhone: userInfo.phone,
+
+            from: {
+                address: fromAddress,
+                location: {
+                    type: "Point",
+                    coordinates: [fromLng, fromLat]
+                }
+            },
+
+            to: {
+                address: toAddress,
+                location: {
+                    type: "Point",
+                    coordinates: [toLng, toLat]
+                }
+            },
+
+            amount: req.body.amount,
+            loadType: req.body.loadType,
+            capacity: req.body.capacity,
+            truckType: req.body.truckType,
+            company: req.body.company,
+            phoneNo: req.body.phoneNo,
+            alternativeNo: req.body.alternativeNo,
+
             scheduleDate: scheduleUTC,
             expireAt,
-            createdAt: Date.now()
+            createdAt: Date.now(),
         });
 
-        return res.status(StatusCodes.OK).json({ status: CommonMessages.TRUE, message: LoadMessages.CREATED, data: newLoad });
+        return res.status(StatusCodes.OK).json({
+            status: CommonMessages.TRUE,
+            message: LoadMessages.CREATED,
+            data: newLoad
+        });
 
     } catch (error) {
         console.error(CommonMessages.PUBLISH_LOAD_API, error);
-        return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ status: CommonMessages.FALSE, error: CommonMessages.SERVER_ERROR });
+        return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+            status: CommonMessages.FALSE,
+            error: CommonMessages.SERVER_ERROR
+        });
     }
 });
+
 
 // ==================
 // UPDATE LOAD

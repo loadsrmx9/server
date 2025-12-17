@@ -1,4 +1,5 @@
-
+const cron = require('node-cron');
+const {PublishLoad} = require('../mongoschema/globalSchema')
 const CronJobSchdule = () => {
     console.log("ExpireLoads Cron Job Started Successfully.");
     cron.schedule("*/1 * * * *", async () => {

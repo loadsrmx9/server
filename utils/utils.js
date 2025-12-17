@@ -1,5 +1,3 @@
-const cron = require("node-cron");
-const {PublishLoad} = require("../mongoschema/globalSchema");
 
 const {CommonMessages} = require('../constants/constants');
 
@@ -53,6 +51,15 @@ const ValidateLoadInput = async(body, requiredFields,client) => {
         } else if (storedOtp !== body.otp) {
             errors.otp = CommonMessages.OTP_INVALID;
         }
+    }
+
+    //lat and long validation
+
+    if(body.fromCoords.length<2){
+        errors.fromCoords = CommonMessages.FROM_COORDS_ERROR
+    }
+    if(body.toCoords.length<2){
+        errors.toCoords = CommonMessages.TO_COORDS_ERROR
     }
 
     // Date validation only if scheduleDate exists and has NO "required" error
