@@ -55,12 +55,12 @@ const ValidateLoadInput = async(body, requiredFields,client) => {
 
     //lat and long validation
 
-    if(body.fromCoords.length<2){
-        errors.fromCoords = CommonMessages.FROM_COORDS_ERROR
-    }
-    if(body.toCoords.length<2){
-        errors.toCoords = CommonMessages.TO_COORDS_ERROR
-    }
+    // if(body.fromCoords.length<2){
+    //     errors.fromCoords = CommonMessages.FROM_COORDS_ERROR
+    // }
+    // if(body.toCoords.length<2){
+    //     errors.toCoords = CommonMessages.TO_COORDS_ERROR
+    // }
 
     // Date validation only if scheduleDate exists and has NO "required" error
     if (body.scheduleDate && !errors.scheduleDate) {

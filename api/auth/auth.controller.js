@@ -1,13 +1,11 @@
-const express = require('express');
+
 const Twilio = require('twilio');
 const redis = require('redis');
 const jwt = require('jsonwebtoken');
 
-const { GenerateOTP, ValidateLoadInput } = require('../utils/utils');
-const { UserData } = require('../mongoschema/globalSchema');
-const {RequiredFields, StatusCodes, CommonMessages} = require('../constants/constants');
-
-const router = express.Router();
+const { GenerateOTP, ValidateLoadInput } = require('../../utils/utils');
+const { UserData } = require('../../modals/userSchema');
+const {RequiredFields, StatusCodes, CommonMessages} = require('../../constants/constants');
 
 //==================
 //redis connection
@@ -37,7 +35,8 @@ client.on('error', err => console.log('Redis Client Error', err));
 //send otp by twilio
 //=====================
 const twilioClient = Twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH);
-router.post('/sendOTP', async (req, res) => {
+
+const sendOTP = async (req, res) => {
     try {
         const { phone } = req.body;
         const { errors } = await ValidateLoadInput(req.body,RequiredFields.SEND_OTP);
@@ -70,12 +69,10 @@ router.post('/sendOTP', async (req, res) => {
         console.error(CommonMessages.SEND_OTP_API, err);
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({success: CommonMessages.FALSE, error:CommonMessages.OTP_FAIL });
     }
-});
+}
 
-//======================
-// verify otp endpoint
-//======================
-router.post('/verifyOTP', async (req, res) => {
+
+const verifyOTP = async (req, res) => {
     try {
         const { phone } = req.body;
         const { errors } = await ValidateLoadInput(req.body,RequiredFields.VERIFY_OTP, client);
@@ -96,7 +93,7 @@ router.post('/verifyOTP', async (req, res) => {
         console.error(CommonMessages.VERIFY_OTP_API, err);
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({status:CommonMessages.FALSE, error:CommonMessages.LOGIN_FAILED });
     }
-});
+}
 
 
-module.exports = router;
+module.exports = {sendOTP,verifyOTP}

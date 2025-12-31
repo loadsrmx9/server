@@ -1,11 +1,5 @@
 const mongoose = require('mongoose');
 
-const userDataSchema = new mongoose.Schema({
-    email: { type: String, required: false },
-    name: { type: String, required: false },
-    phone: { type: String, required: true },
-    profileImage: { data: Buffer, contentType: String }
-})
 
 const publishLoadSchema = new mongoose.Schema(
   {
@@ -56,17 +50,26 @@ const publishLoadSchema = new mongoose.Schema(
     alternativeNo: { type: String },
     userPhone: { type: String },
     scheduleDate: { type: Date, required: true },
+
+    distanceText: { type: String },
+    durationText: { type: String },
+
     expireAt: { type: Date },
     status: { type: String, default: "active" }, // active | completed | deleted
     viewedBy: [{ type: mongoose.Schema.Types.ObjectId }]
   },
   { timestamps: true }
 );
+
+publishLoadSchema.pre("save", function (next) {
+  if (this.isModified("scheduleDate")) {
+    this.expireAt = new Date(this.scheduleDate);
+  }
+  next();
+});
 publishLoadSchema.index({ "from.location": "2dsphere" });
 publishLoadSchema.index({ "to.location": "2dsphere" });
 
-
-const UserData = mongoose.model('userData', userDataSchema);
 const PublishLoad = mongoose.model('publishLoad', publishLoadSchema);
 
-module.exports = { UserData, PublishLoad };
+module.exports = { PublishLoad };
