@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 
 const publishLoadSchema = new mongoose.Schema(
   {
+    //location
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "userData",
@@ -41,22 +42,22 @@ const publishLoadSchema = new mongoose.Schema(
       }
     },
 
+    //load
     amount: { type: Number, required: true },
     loadType: { type: String },
     capacity: { type: String },
     truckType: { type: String },
-    company: { type: String, required: true },
-    phoneNo: { type: String, required: true },
-    alternativeNo: { type: String },
-    userPhone: { type: String },
-    scheduleDate: { type: Date, required: true },
-
     distanceText: { type: String },
     durationText: { type: String },
-
+    scheduleDate: { type: Date, required: true },
     expireAt: { type: Date },
     status: { type: String, default: "active" }, // active | completed | deleted
-    viewedBy: [{ type: mongoose.Schema.Types.ObjectId }]
+    viewedBy: [{ type: mongoose.Schema.Types.ObjectId }],
+
+    //contact
+    alternativeNo: { type: String },
+    userPhone: { type: String },
+    userName: { type: String },
   },
   { timestamps: true }
 );

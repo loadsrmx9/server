@@ -1,7 +1,7 @@
 
-const { PublishLoad} = require('../../modals/loadSchema');
-const {UserData } = require('../../modals/userSchema');
-const { StatusCodes, CommonMessages} = require('../../constants/constants');
+const { PublishLoad } = require('../../modals/loadSchema');
+const { UserData } = require('../../modals/userSchema');
+const { StatusCodes, CommonMessages } = require('../../constants/constants');
 
 
 
@@ -9,9 +9,7 @@ const { StatusCodes, CommonMessages} = require('../../constants/constants');
 const getProfile = async (req, res) => {
     try {
         const profile = await UserData.findById(req.id).lean();
-        const cancelled = await PublishLoad.countDocuments({ userId: req.id, status: "cancelled" });
-        const completed = await PublishLoad.countDocuments({ userId: req.id, status: "completed" });
-        return res.status(StatusCodes.OK).json({ status: CommonMessages.TRUE, message: CommonMessages.USER_DETAILS, data: { ...profile, cancelled, completed } });
+        return res.status(StatusCodes.OK).json({ status: CommonMessages.TRUE, message: CommonMessages.USER_DETAILS, data: profile });
     } catch (error) {
         console.error(CommonMessages.PROFILE_API, error);
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ status: CommonMessages.FALSE, error: CommonMessages.SERVER_ERROR });
@@ -28,10 +26,7 @@ const updateProfile = async (req, res) => {
         if (email) updateData.email = email;
 
         if (req.file) {
-            updateData.profileImage = {
-                data: req.file.buffer,
-                contentType: req.file.mimetype
-            };
+            updateData.profileImage = req.file.path; // ✅ Cloudinary URL
         }
 
         const updated = await UserData.findByIdAndUpdate(
@@ -46,4 +41,4 @@ const updateProfile = async (req, res) => {
     }
 }
 
-module.exports = {getProfile,updateProfile}
+module.exports = { getProfile, updateProfile }

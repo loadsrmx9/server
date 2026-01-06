@@ -1,5 +1,5 @@
 
-const {CommonMessages} = require('../constants/constants');
+const { CommonMessages } = require('../constants/constants');
 
 //6-digit otp generation
 const GenerateOTP = () => {
@@ -19,7 +19,7 @@ const ConvertToUTC629 = (dateString) => {
 }
 
 //input validations
-const ValidateLoadInput = async(body, requiredFields,client) => {
+const ValidateLoadInput = async (body, requiredFields, client) => {
     let errors = {};
     if (requiredFields) {
         requiredFields.forEach(f => {
@@ -29,10 +29,6 @@ const ValidateLoadInput = async(body, requiredFields,client) => {
         });
     }
 
-    // Phone validation
-    if ((body.phoneNo && !/^\d{10}$/.test(body.phoneNo)) || (body.phone && !/^\+91\d{10}$/.test(body.phone))) {
-        errors.phoneNo = CommonMessages.INVALID_MOBILE;
-    }
 
     if (body.alternativeNo && !/^\d{10}$/.test(body.alternativeNo)) {
         errors.alternativeNo = CommonMessages.INVALID_ALT_MOBILE;
@@ -42,7 +38,7 @@ const ValidateLoadInput = async(body, requiredFields,client) => {
         errors.otp = CommonMessages.OTP_LENGTH;
     }
 
-     if (body.otp && body.phone && client) {
+    if (body.otp && body.phone && client) {
         const key = `otp:${body.phone}`;
         const storedOtp = await client.get(key);
 
@@ -82,4 +78,37 @@ const ValidateLoadInput = async(body, requiredFields,client) => {
 };
 
 
-module.exports = { GenerateOTP, ValidateLoadInput };
+const ResponseModify = (load) => {
+    const loadObj = typeof load.toObject === "function"
+        ? load.toObject()
+        : load;
+
+    const responseData = {
+        ...loadObj,
+
+        from: {
+            address: loadObj.from.address,
+            coordinates: loadObj.from.location.coordinates
+        },
+
+        to: {
+            address: loadObj.to.address,
+            coordinates: loadObj.to.location.coordinates
+        }
+    };
+    return responseData
+}
+
+const mapLoadListItem = (load) => ({
+  loadId: load._id,
+  fromAddress: load.from?.address,
+  toAddress: load.to?.address,
+  amount: load.amount,
+  loadType: load.loadType,
+  capacity: load.capacity,
+  scheduleDate: load.scheduleDate,
+  createdAt: load.createdAt
+});
+
+
+module.exports = { GenerateOTP, ValidateLoadInput, ResponseModify,mapLoadListItem };

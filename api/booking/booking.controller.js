@@ -3,6 +3,7 @@ const { LoadBooking } = require('../../modals/bookingSchema');
 const { PublishLoad } = require('../../modals/loadSchema')
 const { emitToUser } = require('../../config/socket');
 const {getGoogleDistance} = require('../../utils/distance');
+const { CommonMessages, LoadMessages, StatusCodes, LoadSocketMessages } = require('../../constants/constants');
 
 
 // =====  Book Load ====== //
@@ -13,11 +14,11 @@ const bookLoad = async (req, res) => {
 
     const load = await PublishLoad.findOne({ _id: loadId, status: "active" });
     if (!load) {
-      return res.status(404).json({ status: false, message: "Load not found or inactive" });
+      return res.status(StatusCodes.NOT_FOUND).json({ status: CommonMessages.FALSE, message: LoadMessages.BOOK_LOAD_NOT_FOUND });
     }
 
     if (String(load.userId) === req.id) {
-      return res.status(400).json({ status: false, message: "You cannot book your own load" });
+      return res.status(StatusCodes.BAD_REQUEST).json({ status: CommonMessages.FALSE, message: LoadMessages.BOOK_OWN_LOAD });
     }
 
     const existing = await LoadBooking.findOne({
@@ -26,7 +27,7 @@ const bookLoad = async (req, res) => {
     });
 
     if (existing) {
-      return res.status(400).json({ status: false, message: "Already booked this load" });
+      return res.status(StatusCodes.BAD_REQUEST).json({ status: CommonMessages.FALSE, message: LoadMessages.ALREADY_BOOKED_LOAD });
     }
 
     const distance = await getGoogleDistance(
@@ -44,21 +45,21 @@ const bookLoad = async (req, res) => {
     });
 
     // after booking created
-    emitToUser(load.userId, "BOOKING_CREATED", {
+    emitToUser(load.userId, LoadSocketMessages.BOOKING_CREATED, {
       bookingId: booking._id,
       loadId: load._id,
-      message: "New booking request received"
+      message: LoadSocketMessages.BOOKING_REQUESTS
     });
 
-    return res.status(200).json({
-      status: true,
-      message: "Load booked successfully",
+    return res.status(StatusCodes.OK).json({
+      status: CommonMessages.TRUE,
+      message: LoadMessages.BOOK_LOAD_SUCCESS,
       data: booking
     });
 
   } catch (error) {
-    console.error("BOOK_LOAD_API", error);
-    return res.status(500).json({ status: false, error: "Server error" });
+    console.error(CommonMessages.BOOK_LOAD_API, error);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ status: CommonMessages.FALSE, error: CommonMessages.SERVER_ERROR });
   }
 }
 
@@ -77,9 +78,9 @@ const approveLoad = async (req, res) => {
       .populate("loadId");
 
     if (!booking) {
-      return res.status(404).json({
-        status: false,
-        message: "Booking not found or already processed"
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        status: CommonMessages.FALSE,
+        message: LoadMessages.BOOKING_NOT_FOUND
       });
     }
 
@@ -90,9 +91,9 @@ const approveLoad = async (req, res) => {
     });
 
     if (alreadyApproved) {
-      return res.status(400).json({
-        status: false,
-        message: "Load already approved for another user"
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        status: CommonMessages.FALSE,
+        message: LoadMessages.BOOKING_APPROVED_OTHER_USER
       });
     }
 
@@ -101,10 +102,10 @@ const approveLoad = async (req, res) => {
     await booking.save();
 
     //real time update
-    emitToUser(booking.bookedBy, "BOOKING_APPROVED", {
+    emitToUser(booking.bookedBy, LoadSocketMessages.BOOKING_APPROVED, {
       bookingId: booking._id,
       loadId: booking.loadId,
-      message: "Your booking has been approved"
+      message: LoadSocketMessages.BOOKING_APPROVED_SUCCESS
     });
 
     // Mark load as completed
@@ -126,16 +127,16 @@ const approveLoad = async (req, res) => {
     );
 
     rejectedBookings.forEach(b => {
-      emitToUser(b.bookedBy, "BOOKING_REJECTED", {
+      emitToUser(b.bookedBy, LoadSocketMessages.BOOKING_REJECTED, {
         bookingId: b._id,
         loadId: booking.loadId,
-        message: "Booking rejected (another user approved)"
+        message: LoadSocketMessages.BOOKING_REJECTED_MESSAGE
       });
     });
 
-    return res.status(200).json({
-      status: true,
-      message: "Booking approved successfully",
+    return res.status(StatusCodes.OK).json({
+      status: CommonMessages.TRUE,
+      message: LoadSocketMessages.BOOKING_SUCCESS,
       approvedUser: {
         id: booking.bookedBy._id,
         name: booking.bookedBy.name,
@@ -145,10 +146,10 @@ const approveLoad = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("APPROVE_BOOKING_API", error);
-    return res.status(500).json({
-      status: false,
-      error: "Server error"
+    console.error(CommonMessages.APPROVE_LOAD_API, error);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      status: CommonMessages.FALSE,
+      error: CommonMessages.SERVER_ERROR
     });
   }
 }
@@ -165,14 +166,14 @@ const rejectLoad = async (req, res) => {
     });
 
     if (!booking) {
-      return res.status(404).json({ status: false, message: "Booking not found or already processed" });
+      return res.status(StatusCodes.BAD_REQUEST).json({ status: false, message: LoadMessages.BOOKING_NOT_FOUND });
     }
 
     if (
       String(booking.bookedBy) !== req.id &&
       String(booking.ownerId) !== req.id
     ) {
-      return res.status(403).json({ status: false, message: "Unauthorized" });
+      return res.status(StatusCodes.UNAUTHORIZED).json({ status: false, message: CommonMessages.UNAUTHORIZED });
     }
 
     booking.status = "cancelled";
@@ -186,20 +187,20 @@ const rejectLoad = async (req, res) => {
         ? booking.ownerId
         : booking.bookedBy;
 
-    emitToUser(notifyUser, "BOOKING_CANCELLED", {
+    emitToUser(notifyUser, LoadSocketMessages.BOOKING_CANCELLED, {
       bookingId: booking._id,
       loadId: booking.loadId,
-      message: "Booking has been cancelled"
+      message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
     });
 
-    return res.status(200).json({
-      status: true,
-      message: "Booking cancelled successfully"
+    return res.status(StatusCodes.OK).json({
+      status: CommonMessages.TRUE,
+      message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
     });
 
   } catch (error) {
-    console.error("CANCEL_BOOKING_API", error);
-    return res.status(500).json({ status: false, error: "Server error" });
+    console.error(CommonMessages.CANCEL_BOOKING_API, error);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ status: CommonMessages.FALSE, error: CommonMessages.SERVER_ERROR });
   }
 }
 
@@ -207,36 +208,41 @@ const rejectLoad = async (req, res) => {
 // =====  Boooked Requests ====== //
 const bookingRequests = async (req, res) => {
   try {
+    const { loadId } = req.params;
+
     const requests = await LoadBooking.find({
       ownerId: req.id,
+      loadId,
       status: "pending"
     })
       .populate("bookedBy", "name email")
-      .populate("loadId", "loadType")
       .sort({ createdAt: -1 })
       .lean();
 
-      // modified response
     const response = requests.map(r => ({
       bookingId: r._id,
       name: r.bookedBy?.name || "Anonymous user",
       distanceText: r.distanceText || null,
-      durationText: r.durationText || null
+      durationText: r.durationText || null,
+      createdAt: r.createdAt
     }));
-    return res.status(200).json({
-      status: true,
-      message: "Pending booking requests",
+
+    return res.status(StatusCodes.OK).json({
+      status: CommonMessages.TRUE,
+      message: LoadMessages.PENDING_REQUESTS,
       data: response
     });
 
   } catch (error) {
-    console.error("BOOKING_REQUESTS_API", error);
-    return res.status(500).json({
-      status: false,
-      error: "Server error"
+    console.error(CommonMessages.BOOKING_REQUESTS_API, error);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      status: CommonMessages.FALSE,
+      error: CommonMessages.SERVER_ERROR
     });
   }
-}
+};
+
+
 
 
 module.exports = { bookLoad, approveLoad, rejectLoad, bookingRequests }

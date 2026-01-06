@@ -7,7 +7,7 @@ const {bookLoad,approveLoad,rejectLoad,bookingRequests} = require('./booking.con
 router.post('/bookLoad/:loadId',jwtAuth,bookLoad);
 router.patch('/approveBooking/:bookingId',jwtAuth,approveLoad);
 router.patch('/cancelBooking/:bookingId',jwtAuth,rejectLoad);
-router.get('/bookingRequests',jwtAuth,bookingRequests);
+router.get('/bookingRequests/:loadId',jwtAuth,bookingRequests);
 
 
 module.exports = router;

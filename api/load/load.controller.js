@@ -1,9 +1,9 @@
 const { PublishLoad } = require('../../modals/loadSchema');
 const { LoadBooking } = require('../../modals/bookingSchema');
 const { UserData } = require('../../modals/userSchema');
-const { ValidateLoadInput } = require('../../utils/utils');
+const { ValidateLoadInput, ResponseModify, mapLoadListItem } = require('../../utils/utils');
 const { RequiredFields, StatusCodes, CommonMessages, LoadMessages } = require('../../constants/constants');
-const {getGoogleDistance} = require('../../utils/distance');
+const { getGoogleDistance } = require('../../utils/distance');
 
 
 const searchLoad = async (req, res) => {
@@ -168,43 +168,36 @@ const searchLoad = async (req, res) => {
 const myLoads = async (req, res) => {
   try {
     const { type } = req.query;
-    let data;
+    let data = [];
 
+    // ================= POSTED =================
     if (type === "posted") {
-      data = await PublishLoad.find({
-        userId: req.id,
-        status: "active"
+      const loads = await PublishLoad.find({
+        userId: req.id
       })
+        .select(
+          "_id from.address to.address amount loadType capacity scheduleDate createdAt"
+        )
         .sort({ createdAt: -1 })
         .lean();
+
+      data = loads.map( mapLoadListItem);
     }
 
+    // ================= REQUESTED =================
     else if (type === "requested") {
-      data = await LoadBooking.find({
+      const bookings = await LoadBooking.find({
         bookedBy: req.id
       })
-        .populate("loadId")
+        .populate({
+          path: "loadId",
+          select:
+            "from.address to.address amount loadType capacity scheduleDate createdAt"
+        })
         .sort({ createdAt: -1 })
         .lean();
-    }
 
-    else if (type === "archived") {
-      const postedArchived = await PublishLoad.find({
-        userId: req.id,
-        status: { $ne: "active" }
-      }).lean();
-
-      const requestedArchived = await LoadBooking.find({
-        bookedBy: req.id,
-        status: { $in: ["approved", "cancelled"] }
-      })
-        .populate("loadId")
-        .lean();
-
-      data = {
-        posted: postedArchived,
-        requested: requestedArchived
-      };
+      data = bookings.map(mapLoadListItem);
     }
 
     else {
@@ -226,7 +219,9 @@ const myLoads = async (req, res) => {
       error: "Server error"
     });
   }
-}
+};
+
+
 
 const loadDetails = async (req, res) => {
   try {
@@ -299,7 +294,7 @@ const loadDetails = async (req, res) => {
       status: CommonMessages.TRUE,
       message: LoadMessages.LOAD_DETAILS,
       data: {
-        loadDetails,
+        ...ResponseModify(loadDetails),
         viewCount,
         contactDetails // only after approval
       }
@@ -339,8 +334,7 @@ const publishLoad = async (req, res) => {
 
     const newLoad = await PublishLoad.create({
       userId: req.id,
-      userPhone: userInfo.phone,
-
+      //location details
       from: {
         address: req.body.fromAddress,
         location: {
@@ -356,27 +350,31 @@ const publishLoad = async (req, res) => {
           coordinates: [req.body.toLng, req.body.toLat]
         }
       },
-
+      //load details
       amount: req.body.amount,
       loadType: req.body.loadType,
       capacity: req.body.capacity,
       truckType: req.body.truckType,
-      company: req.body.company,
-      phoneNo: req.body.phoneNo,
-      alternativeNo: req.body.alternativeNo,
-
       distanceText: distance.distanceText,
       durationText: distance.durationText,
-
       scheduleDate: scheduleUTC,
-      expireAt,
       createdAt: Date.now(),
+      expireAt,
+      //contact details
+      userPhone: userInfo.phone,
+      userName: userInfo.name,
+      alternativeNo: req.body.alternativeNo,
     });
+
+    await UserData.updateOne(
+      { _id: req.id },
+      { $inc: { "totalLoads": 1 } }
+    );
 
     return res.status(StatusCodes.OK).json({
       status: CommonMessages.TRUE,
       message: LoadMessages.CREATED,
-      data: newLoad
+      data: ResponseModify(newLoad)
     });
 
   } catch (error) {
@@ -453,8 +451,6 @@ const updateLoad = async (req, res) => {
       "loadType",
       "capacity",
       "truckType",
-      "company",
-      "phoneNo",
       "alternativeNo"
     ];
 
@@ -464,9 +460,9 @@ const updateLoad = async (req, res) => {
       }
     });
 
-    await load.save();
+    const newLoad = await load.save();
 
-    return res.status(StatusCodes.OK).json({ status: CommonMessages.TRUE, message: LoadMessages.UPDATED, data: load });
+    return res.status(StatusCodes.OK).json({ status: CommonMessages.TRUE, message: LoadMessages.UPDATED, data: ResponseModify(newLoad) });
 
   } catch (error) {
     console.error(CommonMessages.UPDATE_LOAD_API, error);
@@ -507,6 +503,11 @@ const cancelLoad = async (req, res) => {
     await PublishLoad.updateOne(
       { _id: id, userId: req.id },
       { $set: { status: "cancelled" } }
+    );
+
+    await UserData.updateOne(
+      { _id: load.userId },
+      { $inc: { "cancelled": 1 } }
     );
 
     return res.status(StatusCodes.OK).json({ status: CommonMessages.TRUE, message: LoadMessages.CANCELLED });

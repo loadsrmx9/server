@@ -45,13 +45,12 @@ const sendOTP = async (req, res) => {
             return res.status(StatusCodes.BAD_REQUEST).json({ errors });
         }
         const key = `otp:${phone}`;
-        const LastFourDigitPhone = phone.slice(-4);
         const otp = GenerateOTP();
         const existingUser = await UserData.findOne({ phone })
 
         await twilioClient.messages.create({
             body: `Your verification code is ${otp}`,
-            from: "+15676007333",
+            from: process.env.TWILIO_FROM_NUMBER,
             to: phone
         });
 
@@ -64,7 +63,7 @@ const sendOTP = async (req, res) => {
             await newData.save()
         }
 
-        return res.status(StatusCodes.OK).json({ success: CommonMessages.TRUE, message:CommonMessages.OTP_SUCCESS(LastFourDigitPhone)  });
+        return res.status(StatusCodes.OK).json({ success: CommonMessages.TRUE, message:CommonMessages.OTP_SUCCESS(phone)  });
     } catch (err) {
         console.error(CommonMessages.SEND_OTP_API, err);
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({success: CommonMessages.FALSE, error:CommonMessages.OTP_FAIL });
@@ -88,7 +87,7 @@ const verifyOTP = async (req, res) => {
             id: findUser._id
         }
         const accessToken = jwt.sign(payLoad, process.env.JWT_KEY, { expiresIn: '29d' })
-        return res.status(StatusCodes.OK).json({status:CommonMessages.TRUE,message: CommonMessages.LOGIN_SUCCESS ,data:{accessToken}})
+        return res.status(StatusCodes.OK).json({status:CommonMessages.TRUE,message: CommonMessages.LOGIN_SUCCESS ,data:{accessToken,name:findUser.name,email:findUser.email}})
     } catch (err) {
         console.error(CommonMessages.VERIFY_OTP_API, err);
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({status:CommonMessages.FALSE, error:CommonMessages.LOGIN_FAILED });
