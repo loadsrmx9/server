@@ -20,7 +20,7 @@ mongoose.connect(process.env.MONGO_DB_KEY)
     .then(() => {
         console.log('DB Connected')
     })
-    .catch(() => console.error('DB Not Connected'));
+    .catch((eror) => console.error('DB Not Connected',eror));
 
 
 //health check

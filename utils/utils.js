@@ -7,16 +7,6 @@ const GenerateOTP = () => {
     return String(otp).padStart(6, '0');
 }
 
-//data expiration
-const ConvertToUTC629 = (dateString) => {
-    // Convert user date to Date object
-    const dt = new Date(dateString);
-
-    // Set time to 18:29 UTC
-    dt.setUTCHours(18, 29, 0, 0);
-
-    return dt;
-}
 
 //input validations
 const ValidateLoadInput = async (body, requiredFields, client) => {
@@ -30,8 +20,8 @@ const ValidateLoadInput = async (body, requiredFields, client) => {
     }
 
 
-    if (body.alternativeNo && !/^\d{10}$/.test(body.alternativeNo)) {
-        errors.alternativeNo = CommonMessages.INVALID_ALT_MOBILE;
+    if (body.receiverNo && !/^\d{10}$/.test(body.receiverNo)) {
+        errors.receiverNo = CommonMessages.INVALID_MOBILE;
     }
 
     if (body.otp && !/^\d{4,6}$/.test(body.otp)) {
@@ -49,31 +39,47 @@ const ValidateLoadInput = async (body, requiredFields, client) => {
         }
     }
 
-    //lat and long validation
 
-    // if(body.fromCoords.length<2){
-    //     errors.fromCoords = CommonMessages.FROM_COORDS_ERROR
-    // }
-    // if(body.toCoords.length<2){
-    //     errors.toCoords = CommonMessages.TO_COORDS_ERROR
-    // }
+    // scheduleDateTime validation (date + time required)
+    if (body.scheduleDateTime && !errors.scheduleDateTime) {
+        // must be string
+        if (typeof body.scheduleDateTime !== "string") {
+            errors.scheduleDateTime = "Invalid schedule date/time format";
+        } else {
+            // time must be present (ISO should contain "T")
+            if (!body.scheduleDateTime.includes("T")) {
+                errors.scheduleDateTime = "Schedule time is required";
+            } else {
+                const scheduleUTC = new Date(body.scheduleDateTime);
 
-    // Date validation only if scheduleDate exists and has NO "required" error
-    if (body.scheduleDate && !errors.scheduleDate) {
-        const scheduleUTC = ConvertToUTC629(body.scheduleDate);
-        const nowUTC = new Date();
+                // invalid date string
+                if (isNaN(scheduleUTC.getTime())) {
+                    errors.scheduleDateTime = "Invalid schedule date/time";
+                } else {
+                    const nowUTC = new Date();
 
-        if (scheduleUTC <= nowUTC) {
-            errors.scheduleDate = CommonMessages.INVALID_DATE;
+                    // must be future
+                    if (scheduleUTC <= nowUTC) {
+                        errors.scheduleDateTime = CommonMessages.INVALID_DATE; // or custom msg
+                    } else {
+                        // must be within 30 days
+                        const maxUTC = new Date(nowUTC);
+                        maxUTC.setDate(maxUTC.getDate() + 30);
+
+                        if (scheduleUTC > maxUTC) {
+                            errors.scheduleDateTime =
+                                "Schedule date/time must be within 30 days from today";
+                        }
+                    }
+                }
+            }
         }
     }
 
-    const expireAt = ConvertToUTC629(body.scheduleDate);
 
     return {
         errors,
-        scheduleUTC: body.scheduleDate ? ConvertToUTC629(body.scheduleDate) : null,
-        expireAt
+        scheduleUTC: body.scheduleDateTime ? new Date(body.scheduleDateTime) : null,
     };
 };
 
@@ -83,8 +89,9 @@ const ResponseModify = (load) => {
         ? load.toObject()
         : load;
 
+    const { viewedBy, ...cleanLoad } = loadObj;
     const responseData = {
-        ...loadObj,
+        ...cleanLoad,
 
         from: {
             address: loadObj.from.address,
@@ -100,15 +107,56 @@ const ResponseModify = (load) => {
 }
 
 const mapLoadListItem = (load) => ({
-  loadId: load._id,
-  fromAddress: load.from?.address,
-  toAddress: load.to?.address,
-  amount: load.amount,
-  loadType: load.loadType,
-  capacity: load.capacity,
-  scheduleDate: load.scheduleDate,
-  createdAt: load.createdAt
+    loadId: load._id,
+    fromAddress: load.from?.address,
+    toAddress: load.to?.address,
+    amount: load.amount,
+    loadType: load.loadType,
+    capacity: load.capacity,
+    createdAt: load.createdAt,
+    viewCount: load.viewedBy.length
+});
+
+const mapSearchLoadItem = (load) => ({
+    loadId: load._id,
+
+    fromAddress: load.from?.address,
+    toAddress: load.to?.address,
+
+    amount: load.amount,
+    loadType: load.loadType,
+    capacity: load.capacity,
+    createdAt: load.createdAt,
+
+    distanceText: load.distanceText,
+    durationText: load.durationText,
 });
 
 
-module.exports = { GenerateOTP, ValidateLoadInput, ResponseModify,mapLoadListItem };
+//Indian price formatter
+
+const formatINR = (amount) => {
+    const formatedAmount = new Intl.NumberFormat('en-IN', {
+        style: 'currency',
+        currency: 'INR',
+        maximumFractionDigits: 0
+    }).format(amount);
+
+    return formatedAmount;
+}
+
+// format date 03 Jan 2026
+
+const formatDate = (scheduleDate) => {
+    const formattedDate = scheduleDate
+        ? new Date(scheduleDate).toLocaleDateString("en-IN", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+        })
+        : "Not scheduled";
+    return formattedDate
+}
+
+
+module.exports = { GenerateOTP, ValidateLoadInput, ResponseModify, mapLoadListItem, mapSearchLoadItem, formatINR, formatDate };

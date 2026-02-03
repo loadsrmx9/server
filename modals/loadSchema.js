@@ -1,8 +1,27 @@
 const mongoose = require('mongoose');
+const MultilingualTextSchema = new mongoose.Schema(
+  {
+    originalLang: { type: String, required: true }, // en, te, ta, hi, ml, kn
+    en: { type: String },
+    te: { type: String },
+    ta: { type: String },
+    hi: { type: String },
+    ml: { type: String },
+    kn: { type: String }
+  },
+  { _id: false } // prevents extra _id
+);
 
+const counterSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  seq: { type: Number, default: 0 },
+});
+
+const Counter = mongoose.model("Counter", counterSchema);
 
 const publishLoadSchema = new mongoose.Schema(
   {
+    loadId: { type: String, unique: true, index: true },
     //location
     userId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -11,6 +30,7 @@ const publishLoadSchema = new mongoose.Schema(
     },
 
     from: {
+      city: { type: String, required: true },
       address: { type: String, required: true }, // city/place name
       location: {
         type: {
@@ -27,6 +47,7 @@ const publishLoadSchema = new mongoose.Schema(
     },
 
     to: {
+      city: { type: String, required: true },
       address: { type: String, required: true },
       location: {
         type: {
@@ -43,34 +64,43 @@ const publishLoadSchema = new mongoose.Schema(
     },
 
     //load
-    amount: { type: Number, required: true },
-    loadType: { type: String },
-    capacity: { type: String },
-    truckType: { type: String },
+    amount: { type: String, required: true },
+    loadType: { type: String, required: true },
+    capacity: { type: String, required: true },
+    truckType: { type: String, required: true },
+    bodyType: { type: String, required: true },
+    wheelers: { type: String },
     distanceText: { type: String },
     durationText: { type: String },
-    scheduleDate: { type: Date, required: true },
-    expireAt: { type: Date },
-    status: { type: String, default: "active" }, // active | completed | deleted
+    scheduleDateTime: { type: Date, required: true },
+    status: { type: String, default: "active" },
     viewedBy: [{ type: mongoose.Schema.Types.ObjectId }],
 
     //contact
-    alternativeNo: { type: String },
-    userPhone: { type: String },
-    userName: { type: String },
+    receiverNo: { type: String, required: true },
+    receiverName: { type: String, required: true },
   },
   { timestamps: true }
 );
 
-publishLoadSchema.pre("save", function (next) {
-  if (this.isModified("scheduleDate")) {
-    this.expireAt = new Date(this.scheduleDate);
-  }
-  next();
-});
 publishLoadSchema.index({ "from.location": "2dsphere" });
 publishLoadSchema.index({ "to.location": "2dsphere" });
 
+publishLoadSchema.pre("save", async function () {
+  try {
+    if (this.loadId) return;
+
+    const counter = await Counter.findOneAndUpdate(
+      { name: "loadId" },
+      { $inc: { seq: 1 } },
+      { new: true, upsert: true }
+    );
+
+    this.loadId = `LD-${String(counter.seq).padStart(8, "0")}`;
+  } catch (err) {
+    next(err);
+  }
+});
 const PublishLoad = mongoose.model('publishLoad', publishLoadSchema);
 
 module.exports = { PublishLoad };

@@ -1,225 +1,274 @@
 const { PublishLoad } = require('../../modals/loadSchema');
 const { LoadBooking } = require('../../modals/bookingSchema');
 const { UserData } = require('../../modals/userSchema');
-const { ValidateLoadInput, ResponseModify, mapLoadListItem } = require('../../utils/utils');
+const { ValidateLoadInput, ResponseModify, mapLoadListItem, mapSearchLoadItem, formatINR } = require('../../utils/utils');
 const { RequiredFields, StatusCodes, CommonMessages, LoadMessages } = require('../../constants/constants');
-const { getGoogleDistance } = require('../../utils/distance');
+const { calculateRoute ,calculateCurrentFromLocation} = require('../../utils/distance');
+const { translateMulti } = require('../../utils/multiLingual');
 
 
 const searchLoad = async (req, res) => {
   try {
-    const { scheduleDate, fromCoords, toCoords } = req.body;
+    const {
+      scheduleDate,
+      fromLng,
+      fromLat,
+      toLat,
+      toLng,
+      driverLat,
+      driverLng,
+      page = 1
+    } = req.body;
 
-    const { errors } = await ValidateLoadInput(
-      req.body,
-      RequiredFields.SEARCH_LOAD
-    );
+    const { errors } = await ValidateLoadInput(req.body, RequiredFields.SEARCH_LOAD);
 
     if (Object.keys(errors).length > 0) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        errors
+        errors,
       });
     }
 
-    const selectedDate = new Date(scheduleDate);
-    const start = new Date(selectedDate.setHours(0, 0, 0, 0));
-    const end = new Date(selectedDate.setHours(23, 59, 59, 999));
+    const limit = 20;
+    const pageNo = Math.max(parseInt(page) || 1, 1);
+    const skip = (pageNo - 1) * limit;
 
-    const results = await PublishLoad.aggregate([
-      // 1️⃣ Geo search
+    // day start/end filter
+    const selectedDate = new Date(scheduleDate);
+    const start = new Date(new Date(selectedDate).setHours(0, 0, 0, 0));
+    const end = new Date(new Date(selectedDate).setHours(23, 59, 59, 999));
+
+    // get nearby loads
+    const loads = await PublishLoad.aggregate([
+      // from location nearby
       {
         $geoNear: {
-          near: {
-            type: "Point",
-            coordinates: fromCoords
-          },
+          near: { type: "Point", coordinates: [fromLng, fromLat] },
           key: "from.location",
           distanceField: "airDistance",
           maxDistance: CommonMessages.FROM_RADIUS,
-          spherical: true
-        }
+          spherical: true,
+        },
       },
 
-      // 2️⃣ Convert meters → km
-      {
-        $addFields: {
-          airKm: { $divide: ["$airDistance", 1000] }
-        }
-      },
-
-      // 3️⃣ Dynamic multiplier
-      {
-        $addFields: {
-          distanceMultiplier: {
-            $cond: [
-              { $lte: ["$airKm", 10] },
-              1.3,
-              {
-                $cond: [
-                  { $lte: ["$airKm", 40] },
-                  1.2,
-                  1.15
-                ]
-              }
-            ]
-          }
-        }
-      },
-
-      // 4️⃣ Estimated road distance
-      {
-        $addFields: {
-          estimatedRoadKm: {
-            $round: [
-              { $multiply: ["$airKm", "$distanceMultiplier"] },
-              1
-            ]
-          }
-        }
-      },
-
-      // 5️⃣ Average speed
-      {
-        $addFields: {
-          avgSpeed: {
-            $cond: [
-              { $lte: ["$airKm", 10] },
-              25,
-              {
-                $cond: [
-                  { $lte: ["$airKm", 40] },
-                  40,
-                  60
-                ]
-              }
-            ]
-          }
-        }
-      },
-
-      // 6️⃣ ETA calculation
-      {
-        $addFields: {
-          etaMinutes: {
-            $round: [
-              {
-                $multiply: [
-                  { $divide: ["$estimatedRoadKm", "$avgSpeed"] },
-                  60
-                ]
-              },
-              0
-            ]
-          }
-        }
-      },
-
-      // 7️⃣ Filters
+      // only active + scheduled date
       {
         $match: {
           scheduleDate: { $gte: start, $lte: end },
-          status: "active"
-        }
+          status: "active",
+        },
       },
 
+      // to location nearby
       {
         $match: {
           "to.location": {
             $geoWithin: {
               $centerSphere: [
-                toCoords,
-                CommonMessages.TO_RADIUS / CommonMessages.EARTH_RADIUS
-              ]
-            }
-          }
-        }
+                [toLng, toLat],
+                CommonMessages.TO_RADIUS / CommonMessages.EARTH_RADIUS,
+              ],
+            },
+          },
+        },
       },
 
-      // 8️⃣ Sort nearest first
       { $sort: { airDistance: 1 } },
 
-      // 9️⃣ Clean response
-      {
-        $project: {
-          airDistance: 0,
-          airKm: 0,
-          avgSpeed: 0,
-          distanceMultiplier: 0
-        }
-      }
+      // pagination
+      { $skip: skip },
+      { $limit: limit + 1 }, // fetch 1 extra to check next page
+
+      // cleanup
+      { $project: { airDistance: 0 } },
     ]);
+
+    // nothing found
+    if (!loads.length) {
+      return res.status(StatusCodes.OK).json({
+        status: CommonMessages.TRUE,
+        message: LoadMessages.LOADS_FETCH,
+        data: [],
+        meta: {
+          page: pageNo,
+          limit,
+          hasNextPage: false,
+          nextPage: null,
+        },
+      });
+    }
+
+    // check next page
+    const hasNextPage = loads.length > limit;
+    const slicedLoads = hasNextPage ? loads.slice(0, limit) : loads;
+
+    // build destinations list for google
+    const destinations = slicedLoads.map((l) => ({
+      lat: l.from.location.coordinates[1],
+      lng: l.from.location.coordinates[0],
+    }));
+
+    // google distance for these 20 loads
+    let matrix = null;
+    try {
+      matrix = await calculateCurrentFromLocation({
+        originLat: driverLat,
+        originLng: driverLng,
+        destinations,
+      });
+    } catch (e) {
+      console.log("GOOGLE_MATRIX_ERROR", e);
+    }
+
+    const elements = matrix?.rows?.[0]?.elements || [];
+
+    // attach distance + duration to each load
+    const enrichedLoads = slicedLoads.map((load, index) => {
+      const el = elements[index];
+
+      return {
+        ...load,
+        distanceText: el?.distance?.text || null,
+        durationText: el?.duration?.text || null,
+      };
+    });
+
+    const data = enrichedLoads.map(mapSearchLoadItem);
 
     return res.status(StatusCodes.OK).json({
       status: CommonMessages.TRUE,
       message: LoadMessages.LOADS_FETCH,
-      data: results
+      data,
+      meta: {
+        page: pageNo,
+        limit,
+        hasNextPage,
+        nextPage: hasNextPage ? pageNo + 1 : null,
+      },
     });
-
   } catch (error) {
     console.error(CommonMessages.SEARCH_LOAD_API, error);
     return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
       status: CommonMessages.FALSE,
-      error: CommonMessages.SERVER_ERROR
+      error: CommonMessages.SERVER_ERROR,
     });
   }
-}
+};
+
+
 
 const myLoads = async (req, res) => {
   try {
     const { type } = req.query;
+
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = 20; //fixed for infinite scroll
+    const skip = (page - 1) * limit;
+
     let data = [];
+    let totalDocs = 0;
 
     // ================= POSTED =================
     if (type === "posted") {
-      const loads = await PublishLoad.find({
-        userId: req.id
-      })
-        .select(
-          "_id from.address to.address amount loadType capacity scheduleDate createdAt"
-        )
+      const query = { userId: req.id };
+
+      totalDocs = await PublishLoad.countDocuments(query);
+
+      const loads = await PublishLoad.find(query)
         .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
         .lean();
 
-      data = loads.map( mapLoadListItem);
+      const loadIds = loads.map((l) => l._id);
+
+      const bookings = await LoadBooking.find({
+        loadId: { $in: loadIds },
+      })
+        .select("loadId status")
+        .lean();
+
+      const approvedFlowStatuses = [
+        "approved",
+        "scheduled",
+        "picked_up",
+        "in_transit",
+        "delivered",
+        "completed",
+      ];
+
+      const bookingStatusMap = {};
+
+      bookings.forEach((b) => {
+        const loadId = String(b.loadId);
+
+        if (approvedFlowStatuses.includes(b.status)) {
+          bookingStatusMap[loadId] = b.status;
+          return;
+        }
+
+        if (b.status === "pending" && !bookingStatusMap[loadId]) {
+          bookingStatusMap[loadId] = "pending";
+        }
+      });
+
+      data = loads.map((load) => ({
+        ...mapLoadListItem(load),
+        bookingStatus: bookingStatusMap[String(load._id)] || null,
+      }));
     }
 
     // ================= REQUESTED =================
     else if (type === "requested") {
-      const bookings = await LoadBooking.find({
-        bookedBy: req.id
-      })
-        .populate({
-          path: "loadId",
-          select:
-            "from.address to.address amount loadType capacity scheduleDate createdAt"
-        })
+      const query = { bookedBy: req.id };
+
+      totalDocs = await LoadBooking.countDocuments(query);
+
+      const bookings = await LoadBooking.find(query)
+        .populate("loadId")
         .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
         .lean();
 
-      data = bookings.map(mapLoadListItem);
+      data = bookings
+        .filter((b) => b.loadId)
+        .map((b) => ({
+          ...mapLoadListItem(b.loadId),
+          bookingStatus: b.status,
+        }));
     }
 
     else {
       return res.status(400).json({
         status: false,
-        message: "Invalid type"
+        message: "Invalid type",
       });
     }
 
+    const totalPages = Math.ceil(totalDocs / limit);
+
     return res.status(200).json({
       status: true,
-      data
+      data,
+      meta: {
+        page,
+        limit,
+        totalDocs,
+        totalPages,
+        hasNextPage: page < totalPages,
+        nextPage: page < totalPages ? page + 1 : null,
+      },
     });
-
   } catch (error) {
     console.error("MYLOAD_API", error);
     return res.status(500).json({
       status: false,
-      error: "Server error"
+      error: "Server error",
     });
   }
 };
+
 
 
 
@@ -228,32 +277,36 @@ const loadDetails = async (req, res) => {
     const { id } = req.params;
 
     //  Fetch load
-    const loadDetails = await PublishLoad.findById(id).lean();
+    let loadDetails = await PublishLoad.findById(id).lean();
     if (!loadDetails) {
       return res
         .status(StatusCodes.NOT_FOUND)
         .json({ message: LoadMessages.NOT_FOUND });
     }
 
-    // Track views (exclude owner)
-    if (
-      String(loadDetails.userId) !== req.id &&
-      !loadDetails.viewedBy.includes(req.id)
-    ) {
-      await PublishLoad.updateOne(
+    // Only non-owner increments view
+    if (String(loadDetails.userId) !== req.id) {
+      loadDetails = await PublishLoad.findOneAndUpdate(
         { _id: id },
-        { $addToSet: { viewedBy: req.id } }
+        { $addToSet: { viewedBy: req.id } },
+        { new: true }
       );
     }
 
     const viewCount = loadDetails.viewedBy.length;
 
     let contactDetails = null;
+
+    const ownerUser = await UserData.findById(loadDetails.userId)
+      .select("name phone userImage")
+      .lean();
     // OWNER should always see own contact
-    if (String(loadDetails.userId) === req.id) {
+    if (String(loadDetails.userId) === req.id && ownerUser) {
       contactDetails = {
-        role: "load_owner",
-        phone: loadDetails.userPhone,
+        role: "Load Owner",
+        name: ownerUser.name,
+        phone: ownerUser.phone,
+        userImage: ownerUser.userImage,
       };
     }
 
@@ -262,8 +315,8 @@ const loadDetails = async (req, res) => {
       loadId: id,
       status: "approved"
     })
-      .populate("bookedBy", "name email phone")
-      .populate("ownerId", "name email phone")
+      .populate("bookedBy", "name userImage phone")
+      .populate("ownerId", "name userImage phone")
       .lean();
 
     // Contact visibility logic
@@ -272,20 +325,20 @@ const loadDetails = async (req, res) => {
       // OWNER sees approved user
       if (String(loadDetails.userId) === req.id) {
         contactDetails = {
-          role: "approved_user",
+          role: "Approved User",
           name: approvedBooking.bookedBy.name,
-          email: approvedBooking.bookedBy.email,
-          phone: approvedBooking.bookedBy.phone
+          phone: approvedBooking.bookedBy.phone,
+          userImage: approvedBooking.bookedBy.userImage
         };
       }
 
       // APPROVED USER sees owner
       else if (String(approvedBooking.bookedBy._id) === req.id) {
         contactDetails = {
-          role: "load_owner",
+          role: "Load Owner",
           name: approvedBooking.ownerId.name,
-          email: approvedBooking.ownerId.email,
-          phone: approvedBooking.ownerId.phone
+          phone: approvedBooking.ownerId.phone,
+          userImage: approvedBooking.ownerId.userImage
         };
       }
     }
@@ -315,13 +368,13 @@ const publishLoad = async (req, res) => {
 
     const { fromLat, fromLng, toLat, toLng } = req.body;
 
-    const distance = await getGoogleDistance(
+    const distance = await calculateRoute(
       fromLat,
       fromLng,
       toLat,
       toLng
     );
-    const { errors, scheduleUTC, expireAt } =
+    const { errors, scheduleUTC } =
       await ValidateLoadInput(req.body, RequiredFields.PUBLISH_LOAD);
 
     if (Object.keys(errors).length > 0) {
@@ -330,12 +383,28 @@ const publishLoad = async (req, res) => {
         errors
       });
     }
-    const userInfo = await UserData.findById(req.id).lean();
+
+    // const [
+    //   fromAddressI18n,
+    //   toAddressI18n,
+    //   loadTypeI18n,
+    //   truckTypeI18n,
+    //   distanceText1,
+    //   durationText1
+    // ] = await Promise.all([
+    //   translateMulti(req.body.fromAddress),
+    //   translateMulti(req.body.toAddress),
+    //   translateMulti(req.body.loadType),
+    //   translateMulti(req.body.truckType),
+    //   translateMulti(distance.distanceText),
+    //   translateMulti(distance.durationText),
+    // ]);
 
     const newLoad = await PublishLoad.create({
       userId: req.id,
       //location details
       from: {
+        city:req.body.fromCity,
         address: req.body.fromAddress,
         location: {
           type: "Point",
@@ -344,6 +413,7 @@ const publishLoad = async (req, res) => {
       },
 
       to: {
+        city:req.body.toCity,
         address: req.body.toAddress,
         location: {
           type: "Point",
@@ -351,19 +421,19 @@ const publishLoad = async (req, res) => {
         }
       },
       //load details
-      amount: req.body.amount,
+      amount: formatINR(req.body.amount),
       loadType: req.body.loadType,
       capacity: req.body.capacity,
       truckType: req.body.truckType,
+      bodyType: req.body.bodyType,
+      wheelers: req.body.wheelers,
       distanceText: distance.distanceText,
       durationText: distance.durationText,
-      scheduleDate: scheduleUTC,
+      scheduleDateTime: scheduleUTC,
       createdAt: Date.now(),
-      expireAt,
       //contact details
-      userPhone: userInfo.phone,
-      userName: userInfo.name,
-      alternativeNo: req.body.alternativeNo,
+      receiverNo: req.body.receiverNo,
+      receiverName: req.body.receiverName,
     });
 
     await UserData.updateOne(
@@ -390,12 +460,12 @@ const updateLoad = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const load = await PublishLoad.findOne({ _id: id, userId: req.id });
+    const load = await PublishLoad.findOne({ _id: id, userId: req.id, status: "active" });
 
     if (!load) {
       return res.status(StatusCodes.NOT_FOUND).json({ status: CommonMessages.FALSE, message: LoadMessages.NOT_FOUND });
     }
-    const { errors, scheduleUTC } = await ValidateLoadInput({ ...load.toObject(), ...req.body }, RequiredFields.PUBLISH_LOAD);
+    const { errors } = await ValidateLoadInput({ ...load.toObject(), ...req.body }, RequiredFields.PUBLISH_LOAD);
 
     if (Object.keys(errors).length > 0) {
       return res.status(StatusCodes.BAD_REQUEST).json({ status: CommonMessages.FALSE, errors });
@@ -405,6 +475,7 @@ const updateLoad = async (req, res) => {
     //Update from location
     if (req.body.fromLat && req.body.fromLng && req.body.fromAddress) {
       load.from = {
+        city:req.body.fromCity,
         address: req.body.fromAddress,
         location: {
           type: "Point",
@@ -416,6 +487,7 @@ const updateLoad = async (req, res) => {
     //update to location
     if (req.body.toLat && req.body.toLng && req.body.toAddress) {
       load.to = {
+        city:req.body.toCity,
         address: req.body.toAddress,
         location: {
           type: "Point",
@@ -429,7 +501,7 @@ const updateLoad = async (req, res) => {
       (req.body.fromLat && req.body.fromLng) ||
       (req.body.toLat && req.body.toLng)
     ) {
-      const distance = await getGoogleDistance(
+      const distance = await calculateRoute(
         load.from.location.coordinates[1],
         load.from.location.coordinates[0],
         load.to.location.coordinates[1],
@@ -441,8 +513,8 @@ const updateLoad = async (req, res) => {
     }
 
     //update date
-    if (req.body.scheduleDate) {
-      load.scheduleDate = scheduleUTC;
+    if (req.body.scheduleDateTime) {
+      return res.status(403).json({ status: false, message: "Loading Date is not allowed to update" })
     }
 
     //update fields
@@ -451,12 +523,17 @@ const updateLoad = async (req, res) => {
       "loadType",
       "capacity",
       "truckType",
-      "alternativeNo"
+      "receiverName",
+      "receiverNo"
     ];
 
     updatableFields.forEach(field => {
       if (req.body[field] !== undefined) {
-        load[field] = req.body[field];
+        if (field === "amount") {
+          load[field] = formatINR(req.body[field]);
+        } else {
+          load[field] = req.body[field];
+        }
       }
     });
 
@@ -494,7 +571,7 @@ const cancelLoad = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const load = await PublishLoad.findOne({ _id: id, userId: req.id, status: { $ne: "cancelled" } });
+    const load = await PublishLoad.findOne({ _id: id, userId: req.id, status: "active" });
 
     if (!load) {
       return res.status(StatusCodes.NOT_FOUND).json({ status: CommonMessages.FALSE, error: LoadMessages.NOT_FOUND });

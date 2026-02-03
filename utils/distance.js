@@ -1,4 +1,4 @@
-const getGoogleDistance=async(fromLat, fromLng, toLat, toLng)=> {
+const calculateRoute = async (fromLat, fromLng, toLat, toLng) => {
   const url =
     `https://maps.googleapis.com/maps/api/distancematrix/json` +
     `?origins=${fromLat},${fromLng}` +
@@ -26,4 +26,21 @@ const getGoogleDistance=async(fromLat, fromLng, toLat, toLng)=> {
   };
 }
 
-module.exports = {getGoogleDistance};
+const calculateCurrentFromLocation = async ({ originLat, originLng, destinations }) => {
+
+  const destinationsStr = destinations
+    .map((d) => `${d.lat},${d.lng}`)
+    .join("|");
+
+  const url =
+    `https://maps.googleapis.com/maps/api/distancematrix/json` +
+    `?origins=${originLat},${originLng}` +
+    `&destinations=${destinationsStr}` +
+    `&mode=driving&units=metric` +
+    `&key=${process.env.GOOGLE_MAPS_API_KEY}`;
+
+  const resp = await fetch(url);
+  const data = await resp.json();
+  return data;
+};
+module.exports = { calculateRoute, calculateCurrentFromLocation };
