@@ -4,23 +4,39 @@ const { PublishLoad } = require('../../modals/loadSchema')
 const { emitToUser } = require('../../config/socket');
 const { calculateRoute } = require('../../utils/distance');
 const { haversineDistanceKm } = require('../../utils/haversine')
-const { CommonMessages, LoadMessages, StatusCodes, LoadSocketMessages } = require('../../constants/constants');
-
+const { CommonMessages, StatusCodes, } = require('../../constants/common.constants');
 const { sendPushToUser } = require('../../utils/sendFcm');
 const { formatDate } = require('../../utils/utils');
+const BookingConstants = require('../../constants/booking.constants');
+const logger = require('../../utils/logger');
+const PushConstants = require('../../constants/push.constants');
+const SocketConstants = require('../../constants/sockets.constants');
+const { applyCancellationPenalty } = require("../../utils/ratingPenalty");
+const LoadConstants = require('../../constants/load.constants');
+
 // =====  Book Load ====== //
 const bookLoad = async (req, res) => {
   try {
     const { loadId } = req.params;
     const { fromLat, fromLng } = req.body;
 
-    const load = await PublishLoad.findOne({ _id: loadId, status: "active" });
+    const load = await PublishLoad.findOne({
+      _id: loadId,
+      status: BookingConstants.ACTIVE_STATUS
+    });
+
     if (!load) {
-      return res.status(StatusCodes.NOT_FOUND).json({ status: CommonMessages.FALSE, message: LoadMessages.BOOK_LOAD_NOT_FOUND });
+      return res.status(StatusCodes.NOT_FOUND).json({
+        status: CommonMessages.FALSE,
+        message: BookingConstants.LOAD_NOT_FOUND
+      });
     }
 
     if (String(load.userId) === req.id) {
-      return res.status(StatusCodes.BAD_REQUEST).json({ status: CommonMessages.FALSE, message: LoadMessages.BOOK_OWN_LOAD });
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        status: CommonMessages.FALSE,
+        message: BookingConstants.OWN_LOAD
+      });
     }
 
     const existing = await LoadBooking.findOne({
@@ -29,63 +45,92 @@ const bookLoad = async (req, res) => {
     });
 
     if (existing) {
-      return res.status(StatusCodes.BAD_REQUEST).json({ status: CommonMessages.FALSE, message: LoadMessages.ALREADY_BOOKED_LOAD });
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        status: CommonMessages.FALSE,
+        message: BookingConstants.BOOKED_LOAD
+      });
     }
 
     // Block driver from booking new load if already active
     const activeBooking = await LoadBooking.findOne({
       bookedBy: req.id,
-      status: { $in: ["scheduled", "picked_up", "in_transit"] }
+      status: { $in: BookingConstants.BLOCK_DRIVER }
     });
 
     if (activeBooking) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        message: "You already have an active booking. Complete it before booking another."
+        message: BookingConstants.ACTIVE_BOOKING
       });
     }
 
-    const distance = await calculateRoute(
-      fromLat,
-      fromLng,
-      load.from.location.coordinates[1],
-      load.from.location.coordinates[0]
-    );
+    const pendingExpiresAt = new Date(Date.now() + BookingConstants.PENDING_BOOK_EXPIRES);
+
+    let distance = null
+
+    try {
+      distance = await calculateRoute(
+        fromLat,
+        fromLng,
+        load.from.location.coordinates[1],
+        load.from.location.coordinates[0]
+      );
+    } catch (err) {
+      logger.error(err, LoadConstants.GOOGLE_DISTANCE);
+    }
     const booking = await LoadBooking.create({
       loadId,
       bookedBy: req.id,
       ownerId: load.userId,
-      distanceText: distance.distanceText,
-      durationText: distance.durationText,
+      distanceText: distance?.distanceText,
+      durationText: distance?.durationText,
+      status: BookingConstants.PENDING_STATUS,
+      pendingExpiresAt
     });
 
+    const pendingCount = await LoadBooking.countDocuments({
+      loadId,
+      status: BookingConstants.PENDING_STATUS
+    });
+    
     // after booking created
-    emitToUser(load.userId, LoadSocketMessages.BOOKING_CREATED, {
+    emitToUser(load.userId, SocketConstants.BOOKING_CREATED, {
       bookingId: booking._id,
       loadId: load._id,
-      message: LoadSocketMessages.BOOKING_REQUESTS
+      status: `${SocketConstants.BOOKING_MSG}(${pendingCount})`
     });
 
-    await sendPushToUser(
+    sendPushToUser(
       load.userId,
-      "New Booking Request 🚚",
-      `From : ${load.from.city}\nTo : ${load.to.city}\nScheduled at : ${formatDate(load.scheduleDate)}`,
+      PushConstants.BOOK_TITLE,
+      PushConstants.BOOK_MSG(load),
       {
         bookingId: booking._id,
         loadId: load._id,
-        type: "BOOKING_CREATED",
+        type: SocketConstants.BOOKING_CREATED,
       }
+    ).catch((err) =>
+      logger.error(err, "Push Error:")
     );
 
     return res.status(StatusCodes.OK).json({
       status: CommonMessages.TRUE,
-      message: LoadMessages.BOOK_LOAD_SUCCESS,
+      message: BookingConstants.BOOK_SUCCESS,
       data: booking
     });
 
-  } catch (error) {
-    console.error(CommonMessages.BOOK_LOAD_API, error);
-    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ status: CommonMessages.FALSE, error: CommonMessages.SERVER_ERROR });
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        status: CommonMessages.FALSE,
+        message: BookingConstants.BOOKED_LOAD
+      });
+    }
+    logger.error(err, BookingConstants.BOOK_LOAD_LOG);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      status: CommonMessages.FALSE,
+      error: CommonMessages.SERVER_ERROR
+    });
   }
 }
 
@@ -94,200 +139,140 @@ const approveLoad = async (req, res) => {
   try {
     const { bookingId } = req.params;
 
-    // Find booking + user details
+    // Find booking (only pending + owner)
     const booking = await LoadBooking.findOne({
       _id: bookingId,
       ownerId: req.id,
-      status: "pending"
-    })
-      .populate("bookedBy", "name email phone")
-      .populate("loadId");
+      status: BookingConstants.PENDING_STATUS
+    }).populate("loadId");
 
     if (!booking) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        message: LoadMessages.BOOKING_NOT_FOUND
+        message: BookingConstants.BOOKING_NOT_FOUND
       });
     }
 
-    // Check if load already approved
+    // Prevent approving if already assigned
     const alreadyApproved = await LoadBooking.findOne({
       loadId: booking.loadId._id,
-      status: "approved"
+      status: BookingConstants.APPROVED_STATUS
     });
 
     if (alreadyApproved) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        message: LoadMessages.BOOKING_APPROVED_OTHER_USER
+        message: BookingConstants.APPROVED_OTHER_USER
       });
     }
 
-    // Approve this booking
-    booking.status = "approved";
-    await booking.save();
+    // Atomic approval
+    const updatedBooking = await LoadBooking.findOneAndUpdate(
+      {
+        _id: bookingId,
+        ownerId: req.id,
+        status: BookingConstants.PENDING_STATUS
+      },
+      {
+        $set: {
+          status: BookingConstants.APPROVED_STATUS,
+        }
+      },
+      { new: true }
+    )
+      .populate("bookedBy")
+      .populate("loadId");
 
-    console.log("booked", booking.bookedBy);
+    if (!updatedBooking) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        status: CommonMessages.FALSE,
+        message: BookingConstants.BOOKING_NOT_FOUND
+      });
+    }
 
-    //real time update
-    emitToUser(booking.bookedBy._id, LoadSocketMessages.BOOKING_APPROVED, {
-      bookingId: booking._id,
-      loadId: booking.loadId._id,
-      message: LoadSocketMessages.BOOKING_APPROVED_SUCCESS
-    });
-
-    emitToUser(booking.ownerId, LoadSocketMessages.BOOKING_APPROVED, {
-      bookingId: booking._id,
-      loadId: booking.loadId._id,
-      message: LoadSocketMessages.BOOKING_APPROVED_SUCCESS
-    });
-
-    //push notification
-    await sendPushToUser(
-      booking.bookedBy._id,
-      "New Booking Request",
-      "You received a new booking request for your load",
-      { bookingId: booking.bookedBy._id, loadId: booking.loadId._id, type: "BOOKING_CREATED" }
-    );
-
-    await sendPushToUser(
-      booking.ownerId,
-      "New Booking Request",
-      "You received a new booking request for your load",
-      { bookingId: booking._id, loadId: booking.loadId._id, type: "BOOKING_CREATED" }
-    );
-
-    // Mark load as completed
+    // Update load status
     await PublishLoad.updateOne(
-      { _id: booking.loadId._id },
-      { $set: { status: "booked" } }
+      { _id: updatedBooking.loadId._id },
+      { $set: { status: BookingConstants.BOOKED_STATUS } }
     );
 
-    // Cancel all other pending bookings automatically
+    // Reject other pending bookings
     const rejectedBookings = await LoadBooking.find({
-      loadId: booking.loadId,
-      status: "pending",
-      _id: { $ne: booking._id }
-    });
+      loadId: updatedBooking.loadId._id,
+      status: BookingConstants.PENDING_STATUS,
+      _id: { $ne: updatedBooking._id }
+    }).populate("bookedBy", "_id");
 
     await LoadBooking.updateMany(
       { _id: { $in: rejectedBookings.map(b => b._id) } },
-      { $set: { status: "cancelled", cancelledBy: "owner" } }
+      {
+        $set: {
+          status: BookingConstants.CANCELLED_STATUS,
+          cancelledBy: BookingConstants.CANCELLED_BY_OWNER
+        }
+      }
     );
 
+    /*
+     REAL-TIME EVENTS
+    */
+    emitToUser(updatedBooking.bookedBy._id, SocketConstants.BOOKING_APPROVED, {
+      bookingId: updatedBooking._id,
+      loadId: updatedBooking.loadId._id,
+      status: SocketConstants.BOOK_APPROVED_MSG
+    });
+
+    emitToUser(updatedBooking.ownerId, SocketConstants.BOOKING_APPROVED, {
+      bookingId: updatedBooking._id,
+      loadId: updatedBooking.loadId._id,
+      status: SocketConstants.BOOK_APPROVED_MSG
+    });
+
     rejectedBookings.forEach(b => {
-      emitToUser(b.bookedBy._id, LoadSocketMessages.BOOKING_REJECTED, {
+      emitToUser(b.bookedBy._id, SocketConstants.BOOKING_REJECTED, {
         bookingId: b._id,
-        loadId: booking.loadId._id,
-        message: LoadSocketMessages.BOOKING_REJECTED_MESSAGE
+        loadId: updatedBooking.loadId._id,
+        status: SocketConstants.BOOK_REJ_MSG
       });
     });
 
-    return res.status(StatusCodes.OK).json({
-      status: CommonMessages.TRUE,
-      message: LoadSocketMessages.BOOKING_SUCCESS,
-      // approvedUser: {
-      //   id: booking.bookedBy._id,
-      //   name: booking.bookedBy.name,
-      //   email: booking.bookedBy.email,
-      //   phone: booking.bookedBy.phone
-      // }
-    });
+    /*
+     PUSH NOTIFICATIONS (NON-BLOCKING)
+    */
 
-  } catch (error) {
-    console.error(CommonMessages.APPROVE_LOAD_API, error);
-    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
-      status: CommonMessages.FALSE,
-      error: CommonMessages.SERVER_ERROR
-    });
-  }
-}
+    sendPushToUser(
+      updatedBooking.bookedBy._id,
+      PushConstants.APPROVE_TITLE,
+      PushConstants.APPROVE_MSG(updatedBooking),
+      {
+        bookingId: updatedBooking._id.toString(),
+        loadId: updatedBooking.loadId._id.toString(),
+        type: SocketConstants.BOOKING_APPROVED
+      }
+    ).catch(err => logger.error(err, "Push Error"));
 
-
-// =====  Reject Load ====== //
-const rejectLoad = async (req, res) => {
-  try {
-    const { bookingId } = req.params;
-
-    const booking = await LoadBooking.findOne({
-      _id: bookingId,
-      status: "pending"
-    });
-
-    if (!booking) {
-      return res.status(StatusCodes.BAD_REQUEST).json({ status: false, message: LoadMessages.BOOKING_NOT_FOUND });
-    }
-
-    if (
-      String(booking.bookedBy) !== req.id &&
-      String(booking.ownerId) !== req.id
-    ) {
-      return res.status(StatusCodes.UNAUTHORIZED).json({ status: false, message: CommonMessages.UNAUTHORIZED });
-    }
-
-    booking.status = "cancelled";
-    booking.cancelledBy =
-      String(booking.bookedBy) === req.id ? "booker" : "owner";
-
-    await booking.save();
-
-    //notify user
-    emitToUser(booking.bookedBy, LoadSocketMessages.BOOKING_CANCELLED, {
-      bookingId: booking._id,
-      loadId: booking.loadId._id,
-      message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
-    });
-
-    //notify owner
-    //  emitToUser(booking.ownerId, LoadSocketMessages.BOOKING_CANCELLED, {
-    //   bookingId: booking._id,
-    //   loadId: booking.loadId._id,
-    //   message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
-    // });
+    Promise.all(
+      rejectedBookings.map(b =>
+        sendPushToUser(
+          b.bookedBy._id,
+          PushConstants.REJECT_TITLE,
+          PushConstants.REJECT_MSG(updatedBooking),
+          {
+            bookingId: b._id.toString(),
+            loadId: updatedBooking.loadId._id.toString(),
+            type: SocketConstants.BOOKING_REJECTED
+          }
+        )
+      )
+    ).catch((err) => logger.error(err, "push Error"));
 
     return res.status(StatusCodes.OK).json({
       status: CommonMessages.TRUE,
-      message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
+      message: BookingConstants.APPROVE_SUCCESS
     });
 
-  } catch (error) {
-    console.error(CommonMessages.CANCEL_BOOKING_API, error);
-    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ status: CommonMessages.FALSE, error: CommonMessages.SERVER_ERROR });
-  }
-}
-
-
-// =====  Boooked Requests ====== //
-const bookingRequests = async (req, res) => {
-  try {
-    const { loadId } = req.params;
-
-    const requests = await LoadBooking.find({
-      ownerId: req.id,
-      loadId,
-      status: "pending"
-    })
-      .populate("bookedBy", "name userImage")
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const response = requests.map(r => ({
-      bookingId: r._id,
-      name: r.bookedBy?.name,
-      userImage: r.bookedBy.userImage,
-      distanceText: r.distanceText || null,
-      durationText: r.durationText || null,
-      createdAt: r.createdAt
-    }));
-
-    return res.status(StatusCodes.OK).json({
-      status: CommonMessages.TRUE,
-      message: LoadMessages.PENDING_REQUESTS,
-      data: response
-    });
-
-  } catch (error) {
-    console.error(CommonMessages.BOOKING_REQUESTS_API, error);
+  } catch (err) {
+    logger.error(err, BookingConstants.APPROVE_LOAD_LOG);
     return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
       status: CommonMessages.FALSE,
       error: CommonMessages.SERVER_ERROR
@@ -296,70 +281,231 @@ const bookingRequests = async (req, res) => {
 };
 
 
-//===== cancel pending and approved requests by booked user ======= //
+// =====  Reject Load ====== //
+const rejectLoad = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
 
-// ===== Cancel Booking (Booker only) ===== //
+    const booking = await LoadBooking.findOneAndUpdate(
+      {
+        _id: bookingId,
+        ownerId: req.id,
+        status: BookingConstants.PENDING_STATUS
+      },
+      {
+        $set: {
+          status: BookingConstants.CANCELLED_STATUS,
+          cancelledBy: BookingConstants.CANCELLED_BY_OWNER
+        }
+      },
+      { new: true }
+    ).populate("loadId");
+
+    if (!booking) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        status: CommonMessages.FALSE,
+        message: BookingConstants.BOOKING_NOT_FOUND
+      });
+    }
+
+    // check if any pending bookings remain
+    const remainingPending = await LoadBooking.countDocuments({
+      loadId: booking.loadId._id,
+      status: BookingConstants.PENDING_STATUS
+    });
+
+    /*
+      REAL-TIME EVENT
+    */
+    emitToUser(booking.bookedBy, SocketConstants.BOOKING_REJECTED, {
+      bookingId: booking._id,
+      loadId: booking.loadId._id,
+      message: SocketConstants.BOOK_REJ_MSG
+    });
+
+    /*
+      PUSH (NON-BLOCKING)
+    */
+    sendPushToUser(
+      booking.bookedBy,
+      PushConstants.REJECT_TITLE,
+      PushConstants.REJECT_MSG(booking),
+      {
+        bookingId: booking._id.toString(),
+        loadId: booking.loadId._id.toString(),
+        type: SocketConstants.BOOKING_REJECTED
+      }
+    ).catch(err => logger.error(err, "Push Error"));
+
+
+    if (remainingPending === 0) {
+      emitToUser(booking.ownerId, SocketConstants.BOOKING_ACTIVE, {
+        loadId: booking.loadId._id,
+        status: SocketConstants.BOOK_ACTIVE_MSG
+      });
+    }
+
+
+    return res.status(StatusCodes.OK).json({
+      status: CommonMessages.TRUE,
+      message: BookingConstants.REJECT_SUCCESS
+    });
+
+  } catch (err) {
+    logger.error(err, BookingConstants.REJECT_LOAD_LOG);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      status: CommonMessages.FALSE,
+      error: CommonMessages.SERVER_ERROR
+    });
+  }
+};
+
+
+// ===== Cancel Booking ===== //
 const cancelBooking = async (req, res) => {
   try {
     const { bookingId } = req.params;
 
-    const booking = await LoadBooking.findById(bookingId);
+    const booking = await LoadBooking.findById(bookingId).populate("loadId");
 
     if (!booking) {
       return res.status(StatusCodes.NOT_FOUND).json({
         status: CommonMessages.FALSE,
-        message: LoadMessages.BOOKING_NOT_FOUND
+        message: BookingConstants.BOOKING_NOT_FOUND
       });
     }
 
-    // Only booker can cancel
-    if (String(booking.bookedBy) !== req.id) {
+    const isBooker = String(booking.bookedBy) === req.id;
+    const isOwner = String(booking.ownerId) === req.id;
+
+    if (!isBooker && !isOwner) {
       return res.status(StatusCodes.UNAUTHORIZED).json({
         status: CommonMessages.FALSE,
         message: CommonMessages.UNAUTHORIZED
       });
     }
 
-    // Already cancelled
-    if (booking.status === "cancelled") {
+    if (booking.status === BookingConstants.CANCELLED_STATUS) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        message: LoadMessages.BOOKING_ALREADY_CANCELLED
+        message: BookingConstants.BOOKING_CANCELLED
       });
     }
 
-    // Allowed statuses: pending OR approved
-    if (!["pending", "approved"].includes(booking.status)) {
+    if (!BookingConstants.ALLOWED_CANCEL.includes(booking.status)) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        message: LoadMessages.INVALID_BOOKING_STATUS
+        message: BookingConstants.INVALID_STATUS_FLOW
       });
     }
 
-    booking.status = "cancelled";
-    booking.cancelledBy = "booker";
-    await booking.save();
+    // penalty logic
+    if (booking.status === BookingConstants.APPROVED_STATUS) {
+      if (isBooker) {
+        await applyCancellationPenalty(booking.bookedBy, "TruckOwner");
+      } else {
+        await applyCancellationPenalty(booking.ownerId, "Transporter");
+      }
+    }
 
-    // Notify both sides
-    emitToUser(booking.bookedBy, LoadSocketMessages.BOOKING_CANCELLED, {
-      bookingId: booking._id,
-      loadId: booking.loadId._id,
-      message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
-    });
+    // atomic cancel update
+    const updatedBooking = await LoadBooking.findOneAndUpdate(
+      {
+        _id: bookingId,
+        status: { $in: BookingConstants.ALLOWED_CANCEL }
+      },
+      {
+        $set: {
+          status: BookingConstants.CANCELLED_STATUS,
+          cancelledBy: isBooker
+            ? BookingConstants.CANCEL_BY_USER
+            : BookingConstants.CANCELLED_BY_OWNER
+        }
+      },
+      { new: true }
+    ).populate("loadId");
 
-    emitToUser(booking.ownerId, LoadSocketMessages.BOOKING_CANCELLED, {
-      bookingId: booking._id,
-      loadId: booking.loadId._id,
-      message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
-    });
+    if (
+      isBooker &&
+      updatedBooking.loadId?.status === BookingConstants.BOOKED_STATUS
+    ) {
+      await PublishLoad.updateOne(
+        {
+          _id: updatedBooking.loadId._id,
+          status: BookingConstants.BOOKED_STATUS
+        },
+        {
+          $set: { status: BookingConstants.ACTIVE_STATUS }
+        }
+      );
+    }
+    /*
+      REAL-TIME EVENTS
+    */
+    if (isBooker) {
+
+      emitToUser(updatedBooking.bookedBy, SocketConstants.BOOKING_CANCELLED, {
+        bookingId: updatedBooking._id,
+        loadId: updatedBooking.loadId._id,
+        message: SocketConstants.BOOK_CANCEL_MSG
+      });
+
+      emitToUser(updatedBooking.ownerId, SocketConstants.BOOKING_ACTIVE, {
+        bookingId: updatedBooking._id,
+        loadId: updatedBooking.loadId._id,
+        message: SocketConstants.BOOK_ACTIVE_MSG
+      });
+
+    } else {
+
+      emitToUser(updatedBooking.bookedBy, SocketConstants.BOOKING_CANCELLED, {
+        bookingId: updatedBooking._id,
+        loadId: updatedBooking.loadId._id,
+        message: SocketConstants.BOOK_CANCEL_MSG
+      });
+
+      emitToUser(updatedBooking.ownerId, SocketConstants.BOOKING_CANCELLED, {
+        bookingId: updatedBooking._id,
+        loadId: updatedBooking.loadId._id,
+        message: SocketConstants.BOOK_CANCEL_MSG
+      });
+    }
+
+
+    /*
+      PUSH (NON-BLOCKING)
+    */
+    if (isBooker) {
+      sendPushToUser(
+        updatedBooking.ownerId,
+        PushConstants.CANCEL_TITLE,
+        PushConstants.CANCEL_OWNER_MSG(updatedBooking),
+        {
+          bookingId: updatedBooking._id.toString(),
+          loadId: updatedBooking.loadId._id.toString(),
+          type: SocketConstants.BOOKING_CANCELLED
+        }
+      ).catch(logger.error);
+    } else {
+      sendPushToUser(
+        updatedBooking.bookedBy,
+        PushConstants.CANCEL_TITLE,
+        PushConstants.CANCEL_USER_MSG(updatedBooking),
+        {
+          bookingId: updatedBooking._id.toString(),
+          loadId: updatedBooking.loadId._id.toString(),
+          type: SocketConstants.BOOKING_CANCELLED
+        }
+      ).catch(logger.error);
+    }
 
     return res.status(StatusCodes.OK).json({
       status: CommonMessages.TRUE,
-      message: LoadSocketMessages.BOOKING_CANCELLED_MESSAGE
+      message: BookingConstants.CANCEL_SUCCESS
     });
 
-  } catch (error) {
-    console.error(CommonMessages.CANCEL_BOOKING_API, error);
+  } catch (err) {
+    logger.error(err, BookingConstants.CANCEL_LOAD_LOG);
     return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
       status: CommonMessages.FALSE,
       error: CommonMessages.SERVER_ERROR
@@ -380,177 +526,255 @@ const updateBookingStatus = async (req, res) => {
     if (!booking) {
       return res.status(StatusCodes.NOT_FOUND).json({
         status: CommonMessages.FALSE,
-        message: LoadMessages.BOOKING_NOT_FOUND
+        message: BookingConstants.BOOKING_NOT_FOUND
       });
     }
 
-    // ✅ update flow starts only after approve
-    if (booking.status === "pending") {
+    if (booking.status === BookingConstants.PENDING_STATUS) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        message: "Booking not approved yet"
+        message: BookingConstants.BOOK_NOT_APPROVED
       });
     }
 
-    const isOwner = String(booking.ownerId) === req.id;
-    const isBooker = String(booking.bookedBy) === req.id;
-
-    /**
-     * FLOW:
-     * approved -> confirmed
-     * confirmed -> picked_up (AUTO becomes in_transit)
-     * in_transit -> delivered (AUTO becomes completed)
-     */
     const allowedFlow = {
-      approved: ["confirm"],
-      confirm: ["picked_up"],
-      in_transit: ["delivered"]
+      [BookingConstants.APPROVED_STATUS]: [BookingConstants.START_TRIP],
+      [BookingConstants.START_TRIP]: [BookingConstants.REACHED_PICKUP],
+      [BookingConstants.REACHED_PICKUP]: [BookingConstants.PICKED_UP],
+      [BookingConstants.IN_TRANSIT]: [BookingConstants.DELIVERED],
     };
 
-    // ✅ validate transition
     if (!allowedFlow[booking.status]?.includes(status)) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         status: CommonMessages.FALSE,
-        message: "Invalid status transition"
+        message: BookingConstants.INVALID_STATUS_FLOW
       });
     }
 
-    // ✅ role access
-    if (status === "confirm" && !isOwner) {
-      return res.status(StatusCodes.UNAUTHORIZED).json({
-        status: CommonMessages.FALSE,
-        message: "Only owner can do this action"
-      });
-    }
+    const pickupLat = booking.loadId?.from?.location?.coordinates?.[1];
+    const pickupLng = booking.loadId?.from?.location?.coordinates?.[0];
+    const dropLat = booking.loadId?.to?.location?.coordinates?.[1];
+    const dropLng = booking.loadId?.to?.location?.coordinates?.[0];
 
-    if (["picked_up", "delivered"].includes(status) && !isBooker) {
-      return res.status(StatusCodes.UNAUTHORIZED).json({
-        status: CommonMessages.FALSE,
-        message: "Only driver/booker can do this action"
-      });
-    }
-
-    // ✅ pickup/delivery 1KM validation
-    if (["picked_up", "delivered"].includes(status)) {
-      if (typeof lat !== "number" || typeof lng !== "number") {
+    if (BookingConstants.ALLOWED_STATUS.includes(status)) {
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
         return res.status(StatusCodes.BAD_REQUEST).json({
           status: CommonMessages.FALSE,
-          message: "lat and lng required"
+          message: BookingConstants.COORD_REQUIRED
         });
       }
 
-      const pickupLat = booking.loadId.from.location.coordinates[1];
-      const pickupLng = booking.loadId.from.location.coordinates[0];
+      if (status === BookingConstants.START_TRIP) {
+        booking.startedTripAt = new Date();
 
-      const dropLat = booking.loadId.to.location.coordinates[1];
-      const dropLng = booking.loadId.to.location.coordinates[0];
+        const otherBookings = await LoadBooking.find({
+          bookedBy: booking.bookedBy,
+          _id: { $ne: booking._id },
+          status: {
+            $in: [
+              BookingConstants.PENDING_STATUS,
+              BookingConstants.APPROVED_STATUS
+            ]
+          }
+        }).populate("loadId");
 
-      // ✅ Validate pickup distance
-      if (status === "picked_up") {
+        for (const other of otherBookings) {
+          const wasApproved =
+            other.status === BookingConstants.APPROVED_STATUS;
+
+          // cancel booking
+          other.status = BookingConstants.CANCELLED_STATUS;
+          other.cancelledAt = new Date();
+          await other.save();
+
+          /*
+            ONLY APPROVED → transporter notifications
+          */
+          if (wasApproved) {
+            await PublishLoad.updateOne(
+              { _id: other.loadId._id },
+              { $set: { status: LoadConstants.LOAD_STATUS_ACTIVE } }
+            );
+
+            emitToUser(other.ownerId, SocketConstants.BOOKING_ACTIVE, {
+              loadId: other.loadId._id,
+              status: SocketConstants.BOOK_ACTIVE_MSG
+            });
+
+            sendPushToUser(
+              other.ownerId,
+              "Truck unavailable",
+              "Truck owner started another trip. Load is active again.",
+              {
+                loadId: other.loadId._id.toString(),
+                type: LoadConstants.LOAD_STATUS_ACTIVE
+              }
+            ).catch(logger.error);
+          }
+        }
+      }
+
+      if (status === BookingConstants.REACHED_PICKUP) {
         const distance = haversineDistanceKm(lat, lng, pickupLat, pickupLng);
-
         if (distance > 1) {
           return res.status(StatusCodes.BAD_REQUEST).json({
             status: CommonMessages.FALSE,
-            message: `You must be within 1KM of pickup location`
+            message: BookingConstants.PICKUP_KM_MSG
+          });
+        }
+        booking.reachedPickupAt = new Date();
+        booking.reachedPickupProof = { lat, lng, at: new Date() };
+      }
+
+      if (status === BookingConstants.PICKED_UP) {
+        const distance = haversineDistanceKm(lat, lng, pickupLat, pickupLng);
+        if (distance > 1) {
+          return res.status(StatusCodes.BAD_REQUEST).json({
+            status: CommonMessages.FALSE,
+            message: BookingConstants.PICKUP_KM_MSG
           });
         }
 
-        // ✅ pickup proof
         booking.pickedUpAt = new Date();
         booking.pickupProof = { lat, lng, at: new Date() };
-
-        // ✅ also set transit time because now it directly goes to transit
         booking.inTransitAt = new Date();
       }
 
-      // ✅ Validate delivery distance
-      if (status === "delivered") {
+      if (status === BookingConstants.DELIVERED) {
         const distance = haversineDistanceKm(lat, lng, dropLat, dropLng);
-
         if (distance > 1) {
           return res.status(StatusCodes.BAD_REQUEST).json({
             status: CommonMessages.FALSE,
-            message: `You must be within 1KM of delivery location`
+            message: BookingConstants.DELIVERD_KM_MSG
           });
         }
 
         booking.deliveredAt = new Date();
         booking.deliveryProof = { lat, lng, at: new Date() };
-
-        // AUTO COMPLETE when delivered
         booking.completedAt = new Date();
       }
     }
 
-    // STATUS SET (AUTOMATION)
-    // picked_up -> in_transit
-    // delivered -> completed
-    if (status === "picked_up") {
-      booking.status = "in_transit";
-    } else if (status === "delivered") {
-      booking.status = "completed";
+    // STATUS AUTOMATION
+    if (status === BookingConstants.PICKED_UP) {
+      booking.status = BookingConstants.IN_TRANSIT;
+    } else if (status === BookingConstants.DELIVERED) {
+      booking.status = BookingConstants.COMPLETED;
     } else {
       booking.status = status;
     }
 
-    // // ✅ timestamps for scheduled
-    // if (status === "scheduled") booking.scheduledAt = scheduledAt || new Date();
+    // ATOMIC SAVE
+    const updatedBooking = await LoadBooking.findOneAndUpdate(
+      { _id: bookingId },
+      booking.toObject(),
+      { new: true }
+    );
 
-    await booking.save();
-
-    // ✅ final status to emit
     const finalStatus =
-      status === "picked_up"
-        ? "in_transit"
-        : status === "delivered"
-          ? "completed"
+      status === BookingConstants.PICKED_UP
+        ? BookingConstants.IN_TRANSIT
+        : status === BookingConstants.DELIVERED
+          ? BookingConstants.COMPLETED
           : status;
 
-    // ✅ notify both status updated
-    emitToUser(booking.bookedBy, LoadSocketMessages.BOOKING_STATUS_UPDATED, {
-      bookingId: booking._id,
+    emitToUser(updatedBooking.bookedBy, SocketConstants.BOOKING_STATUS, {
+      bookingId: updatedBooking._id,
       loadId: booking.loadId._id,
       status: finalStatus
     });
 
-    emitToUser(booking.ownerId, LoadSocketMessages.BOOKING_STATUS_UPDATED, {
-      bookingId: booking._id,
+    emitToUser(updatedBooking.ownerId, SocketConstants.BOOKING_STATUS, {
+      bookingId: updatedBooking._id,
       loadId: booking.loadId._id,
       status: finalStatus
     });
 
-    // tracking will start when status is in_transit
-    if (booking.status === "in_transit") {
-      emitToUser(booking.ownerId, LoadSocketMessages.TRACKING_START, { bookingId: booking._id });
-      emitToUser(booking.bookedBy, LoadSocketMessages.TRACKING_START, { bookingId: booking._id });
+    if (
+      status === BookingConstants.START_TRIP ||
+      updatedBooking.status === BookingConstants.IN_TRANSIT
+    ) {
+      emitToUser(updatedBooking.ownerId, SocketConstants.TRACKING_START, {
+        bookingId: updatedBooking._id
+      });
+
+      emitToUser(updatedBooking.bookedBy, SocketConstants.TRACKING_START, {
+        bookingId: updatedBooking._id
+      });
     }
 
-    // Stop tracking when delivered (because now completed)
-    if (status === "delivered") {
-      emitToUser(booking.ownerId, LoadSocketMessages.TRACKING_STOP, {
-        bookingId: booking._id
+    if (
+      status === BookingConstants.REACHED_PICKUP ||
+      status === BookingConstants.DELIVERED
+    ) {
+      emitToUser(updatedBooking.ownerId, SocketConstants.TRACKING_STOP, {
+        bookingId: updatedBooking._id
       });
 
-      emitToUser(booking.bookedBy, LoadSocketMessages.TRACKING_STOP, {
-        bookingId: booking._id
+      emitToUser(updatedBooking.bookedBy, SocketConstants.TRACKING_STOP, {
+        bookingId: updatedBooking._id
       });
 
-      // ✅ mark load completed too
-      await PublishLoad.updateOne(
-        { _id: booking.loadId._id },
-        { $set: { status: "completed" } }
-      );
+      if (status === BookingConstants.DELIVERED) {
+        await PublishLoad.updateOne(
+          { _id: booking.loadId._id },
+          { $set: { status: BookingConstants.COMPLETED } }
+        );
+      }
+    }
+
+    const routeText = `${booking.loadId.from.city} - ${booking.loadId.to.city}`;
+
+    const pushMap = {
+
+      [BookingConstants.START_TRIP]: {
+        title: PushConstants.START_TRIP_TITLE,
+        msg: PushConstants.START_TRIP_MSG(routeText),
+        type: SocketConstants.TRIP_STARTED,
+        receiver: updatedBooking.ownerId,
+      },
+      [BookingConstants.REACHED_PICKUP]: {
+        title: PushConstants.REACHED_PICKUP_TITLE,
+        msg: PushConstants.REACHED_PICKUP_MSG(routeText),
+        type: SocketConstants.REACHED_PICKUP,
+        receiver: updatedBooking.ownerId,
+      },
+      [BookingConstants.PICKED_UP]: {
+        title: PushConstants.PICK_TITLE,
+        msg: PushConstants.PICK_MSG(routeText),
+        type: SocketConstants.LOAD_PICKED_UP,
+        receiver: updatedBooking.ownerId,
+      },
+      [BookingConstants.DELIVERED]: {
+        title: PushConstants.DEL_TITLE,
+        msg: PushConstants.DEL_MSG(routeText),
+        type: SocketConstants.LOAD_DELIVERED,
+        receiver: updatedBooking.ownerId,
+      },
+    };
+
+    if (pushMap[status]) {
+      sendPushToUser(
+        pushMap[status].receiver,
+        pushMap[status].title,
+        pushMap[status].msg,
+        {
+          bookingId: updatedBooking._id.toString(),
+          loadId: booking.loadId._id.toString(),
+          type: pushMap[status].type,
+          status: finalStatus,
+        }
+      ).catch(logger.error);
     }
 
     return res.status(StatusCodes.OK).json({
       status: CommonMessages.TRUE,
-      message: "Booking status updated successfully",
-      data: booking
+      message: BookingConstants.BOOKING_STATUS_SUCCESS,
+      data: updatedBooking
     });
 
-  } catch (error) {
-    console.error("updateBookingStatus error:", error);
+  } catch (err) {
+    logger.error(err, BookingConstants.UPDATE_STATUS_LOG);
     return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
       status: CommonMessages.FALSE,
       error: CommonMessages.SERVER_ERROR
@@ -558,6 +782,45 @@ const updateBookingStatus = async (req, res) => {
   }
 };
 
+
+// =====  Boooked Requests ====== //
+const bookingRequests = async (req, res) => {
+  try {
+    const { loadId } = req.params;
+
+    const requests = await LoadBooking.find({
+      ownerId: req.id,
+      loadId,
+      status: BookingConstants.PENDING_STATUS
+    })
+      .populate("bookedBy", "name userImage")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const response = requests.map(r => ({
+      bookingId: r._id,
+      name: r.bookedBy?.name,
+      userImage: r.bookedBy.userImage,
+      distanceText: r.distanceText || null,
+      durationText: r.durationText || null,
+      expiresAt: r.pendingExpiresAt,
+      createdAt: r.createdAt
+    }));
+
+    return res.status(StatusCodes.OK).json({
+      status: CommonMessages.TRUE,
+      message: BookingConstants.BOOK_REQ_SUCCESS,
+      data: response
+    });
+
+  } catch (err) {
+    logger.error(err, BookingConstants.BOOK_REQ_LOG);
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      status: CommonMessages.FALSE,
+      error: CommonMessages.SERVER_ERROR
+    });
+  }
+};
 
 
 

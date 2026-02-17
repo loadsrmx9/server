@@ -2,14 +2,14 @@ const express = require('express');
 const router = express.Router();
 const jwtAuth = require('../../middleware/jwtToken');
 const upload = require('../../middleware/multer');
-const { getProfile, submitKyc ,updateFcmToken} = require('./user.controller')
+const { getProfile, submitKyc ,updateFcmToken,submitRating} = require('./user.controller')
 
 router.get('/profile', jwtAuth, getProfile);
 
 router.patch('/sendFcm', jwtAuth, updateFcmToken);
-
+router.post('/submitRating/:bookingId', jwtAuth,submitRating);
 router.patch(
-    "/updateProfile",
+    "/profileKyc",
     jwtAuth,
     upload.fields([
         { name: "aadharFront", maxCount: 1 },

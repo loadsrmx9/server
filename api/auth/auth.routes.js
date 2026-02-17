@@ -8,7 +8,7 @@ const jwtAuth = require('../../middleware/jwtToken')
 router.post('/sendOTP',sendOTP);
 router.post('/verifyOTP',verifyOTP);
 router.post('/refreshToken', refreshAccessToken);
-router.post('/setMyRole/:userId', setMyRole);
+router.post('/setMyRole', jwtAuth, setMyRole);
 router.post('/logout', jwtAuth, logout);
 
 module.exports = router;

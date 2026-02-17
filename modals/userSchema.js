@@ -2,11 +2,18 @@ const mongoose = require("mongoose");
 
 const userDataSchema = new mongoose.Schema(
   {
-    phone: { type: String, required: true, unique: true },
-    fcmToken: { type: String, default: null },
+    phone: { type: String, required: true, unique: true, sparse: true },
+    fcmTokens: [
+      {
+        token: { type: String, required: true },
+        deviceId: { type: String },
+        platform: { type: String },
+        createdAt: { type: Date, default: Date.now }
+      }
+    ],
     role: {
       type: String,
-      enum: ["Transporter", "TruckOwner", "Admin"],
+      enum: ["Transporter", "TruckOwner"],
       default: null
     },
 
@@ -15,7 +22,8 @@ const userDataSchema = new mongoose.Schema(
 
     // Aadhar
     aadhar: {
-      aadharNumber: { type: String, default: null, unique: true, sparse: true },
+      aadharNumber: { type: String }, 
+      aadharHash: { type: String, unique: true, sparse: true }, // hash for duplicate check
       verified: { type: Boolean, default: false },
       frontImageUrl: { type: String, default: null },
       backImageUrl: { type: String, default: null },
@@ -24,7 +32,8 @@ const userDataSchema = new mongoose.Schema(
 
     // DL
     drivingLicence: {
-      dlNumber: { type: String, default: null, unique: true, sparse: true },
+      dlNumber: { type: String }, 
+      dlHash: { type: String, unique: true, sparse: true },
       verified: { type: Boolean, default: false },
       frontImageUrl: { type: String, default: null },
       backImageUrl: { type: String, default: null },
@@ -33,22 +42,46 @@ const userDataSchema = new mongoose.Schema(
 
     // RC
     rcBook: {
-      rcNumber: { type: String, default: null, unique: true, sparse: true },
+      rcNumber: { type: String },
+      rcHash: { type: String, unique: true, sparse: true },
       verified: { type: Boolean, default: false },
       frontImageUrl: { type: String, default: null },
       backImageUrl: { type: String, default: null },
       rejectedReason: { type: String, default: null },
     },
 
-    kycStatus: {
+
+    truckOwnerKycStatus: {
       type: String,
-      enum: ["not_submitted", "pending", "approved", "rejected"],
+      enum: ["not_submitted", "Pending", "Approved", "Rejected"],
+      default: "not_submitted",
+    },
+    transporterKycStatus: {
+      type: String,
+      enum: ["not_submitted", "Pending", "Approved", "Rejected"],
       default: "not_submitted",
     },
 
     totalLoads: { type: Number, default: 0 },
     completed: { type: Number, default: 0 },
     cancelled: { type: Number, default: 0 },
+
+    reportCount: { type: Number, default: 0 },
+    isBlocked: { type: Boolean, default: false },
+    blockedReason: { type: String },
+
+    ratings: {
+      transporter: {
+        average: { type: Number, default: 5 },
+        count: { type: Number, default: 0 },
+        total: { type: Number, default: 0 },
+      },
+      truckOwner: {
+        average: { type: Number, default: 5 },
+        count: { type: Number, default: 0 },
+        total: { type: Number, default: 0 },
+      }
+    },
   },
   { timestamps: true }
 );

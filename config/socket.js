@@ -2,7 +2,7 @@ const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const { createAdapter } = require("@socket.io/redis-adapter");
 const IORedis = require("ioredis");
-const { registerLoadTrackingSocket } = require("../api/booking/IntransitSocket");
+const { liveTracking } = require("../api/booking/liveTracking");
 
 let io;
 
@@ -18,8 +18,7 @@ const emitToUser = async (userId, event, payload) => {
 };
 
 const initSocket = (server) => {
-  console.log("🔥 initSocket called");
-
+  
   io = new Server(server, {
     cors: { origin: "*" },
     transports: ["websocket"], // Fly.io requires this
@@ -52,7 +51,7 @@ const initSocket = (server) => {
 
     // 🔥 Join permanent user room
     await socket.join(room);
-    registerLoadTrackingSocket(socket,emitToUser);
+    liveTracking(socket,emitToUser);
     // 🔥 Kill old ghost sockets
     const sockets = await io.in(room).fetchSockets();
     sockets.forEach((s) => {

@@ -1,99 +1,82 @@
-
-const Twilio = require('twilio');
-const redis = require('redis');
 const jwt = require('jsonwebtoken');
 
 const { GenerateOTP, ValidateLoadInput } = require('../../utils/utils');
 const { UserData } = require('../../modals/userSchema');
-const { RequiredFields, StatusCodes, CommonMessages } = require('../../constants/constants');
-const { refreshToken } = require('firebase-admin/app');
+const { RequiredFields, StatusCodes, CommonMessages } = require('../../constants/common.constants');
+const { client } = require('../../utils/redis');
+const AuthConstants = require('../../constants/auth.constants');
+const logger = require('../../utils/logger');
 
-//==================
-//redis connection
-//==================
-
-const client = redis.createClient({
-    username: process.env.REDIS_USERNAME,
-    password: process.env.REDIS_PASSWORD,
-    socket: {
-        host: process.env.REDIS_HOST,
-        port: process.env.REDIS_PORT,
-    }
-});
-
-client.on('error', err => console.log('Redis Client Error', err));
-
-(async () => {
-    try {
-        await client.connect();
-        console.log('Redis connected');
-    } catch (e) {
-        console.error('Failed to connect to Redis', e);
-    }
-})();
-
-//=====================
-//send otp by twilio
-//=====================
-const twilioClient = Twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH);
+// =================== SEND OTP ======================//
 
 const sendOTP = async (req, res) => {
     try {
-        const { phone } = req.body;
+        let { phone } = req.body;
         const { errors } = await ValidateLoadInput(req.body, RequiredFields.SEND_OTP);
 
         if (Object.keys(errors).length > 0) {
-            return res.status(StatusCodes.BAD_REQUEST).json({ errors });
+            return res.status(StatusCodes.BAD_REQUEST).json({
+                status: CommonMessages.FALSE,
+                errors
+            });
         }
+
+        phone = AuthConstants.IND_FORMAT(phone);
         const key = `otp:${phone}`;
         const isDev = process.env.NODE_ENV === "development";
         const otp = isDev
             ? process.env.MASTER_TEST_OTP
             : GenerateOTP();
-        // const otp = GenerateOTP();
 
-        if (!isDev) {
-            await twilioClient.messages.create({
-                body: `Your verification code is ${otp}`,
-                from: process.env.TWILIO_FROM_NUMBER,
-                to: phone
-            });
-
-        }
         // store OTP in redis with 60 seconds expiry
-        await client.set(key, otp, { EX: 60 });
+        await client.set(key, otp, { EX: AuthConstants.OTP_EXPIRY });
 
         //pass data to DB
-        const existingUser = await UserData.findOne({ phone })
-        if (!existingUser) {
-            const newData = new UserData({ phone });
-            await newData.save()
-        }
+        await UserData.updateOne(
+            { phone },
+            { $setOnInsert: { phone } },
+            { upsert: true }
+        );
+
 
         return res.status(StatusCodes.OK).json(
             {
-                success: CommonMessages.TRUE,
-                message: CommonMessages.OTP_SUCCESS(phone)
+                status: CommonMessages.TRUE,
+                message: AuthConstants.OTP_SUCCESS(phone)
             });
     } catch (err) {
-        console.error(CommonMessages.SEND_OTP_API, err);
-        return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ success: CommonMessages.FALSE, error: CommonMessages.OTP_FAIL });
+        logger.error(err, AuthConstants.SEND_OTP_LOG);
+        return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+            status: CommonMessages.FALSE,
+            error: CommonMessages.SERVER_ERROR
+        });
     }
 }
 
+// ========================= VERIFY OTP ========================//
 
 const verifyOTP = async (req, res) => {
     try {
-        const { phone } = req.body;
+        let { phone } = req.body;
         const { errors } = await ValidateLoadInput(req.body, RequiredFields.VERIFY_OTP, client);
 
         if (Object.keys(errors).length > 0) {
-            return res.status(StatusCodes.BAD_REQUEST).json({ errors });
+            return res.status(StatusCodes.BAD_REQUEST).json({
+                status:CommonMessages.FALSE, 
+                errors 
+            });
         }
 
-        const findUser = await UserData.findOne({ phone });
-        // OTP is valid — remove it and respond success
-        await client.del(`otp:${phone}`);
+        phone = AuthConstants.IND_FORMAT(phone);
+        const findUser = await UserData.findOne({ phone }).lean();
+
+        if (!findUser) {
+            return res.status(StatusCodes.NOT_FOUND).json({ message: AuthConstants.USER_NOT_FOUND });
+        }
+
+        const otpKey = `otp:${phone}`;
+        const refreshKey = `refresh:${findUser._id}`;
+
         let payLoad = {
             id: findUser._id
         }
@@ -107,15 +90,32 @@ const verifyOTP = async (req, res) => {
             expiresIn: process.env.REFRESH_TOKEN_EXP,
         });
 
-        // store refresh token in redis 
-        await client.set(`refresh:${findUser._id}`, refreshToken, { EX: 60 * 60 * 24 * 30 });
+        // store refresh token & del otp  in redis 
+        const redisTasks = [
+            client.del(otpKey).catch(e => logger.error(AuthConstants.OTP_DEL_ERROR, e)),
+            client.set(refreshKey, refreshToken, { EX: AuthConstants.REFRESH_EXPIRY })
+        ];
 
-        return res.status(StatusCodes.OK).json({ status: CommonMessages.TRUE, message: CommonMessages.LOGIN_SUCCESS, data: { accessToken, refreshToken, role: findUser.role } })
+        await Promise.all(redisTasks);
+
+        return res.status(StatusCodes.OK).json({
+            status: CommonMessages.TRUE,
+            message: AuthConstants.OTP_VERIFIED,
+            data: {
+                accessToken, refreshToken,
+                role: findUser.role
+            }
+        })
     } catch (err) {
-        console.error(CommonMessages.VERIFY_OTP_API, err);
-        return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ status: CommonMessages.FALSE, error: CommonMessages.LOGIN_FAILED });
+        logger.error(err, AuthConstants.VERIFY_OTP_LOG);
+        return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ 
+            status: CommonMessages.FALSE, 
+            error: CommonMessages.SERVER_ERROR 
+        });
     }
 }
+
+// ============================= REFRESH TOKEN ===========================//
 
 const refreshAccessToken = async (req, res) => {
     try {
@@ -124,117 +124,156 @@ const refreshAccessToken = async (req, res) => {
         if (!refreshToken) {
             return res.status(StatusCodes.BAD_REQUEST).json({
                 status: CommonMessages.FALSE,
-                message: "Refresh token required"
+                message: AuthConstants.REFRESH_REQUIRED
             });
         }
 
-        jwt.verify(refreshToken, process.env.JWT_REFRESH_KEY, async (err, payload) => {
-            if (err) {
-                return res.status(StatusCodes.UNAUTHORIZED).json({
-                    status: CommonMessages.FALSE,
-                    message: "Invalid refresh token"
-                });
-            }
-
-            const userId = payload.id;
-
-            // Check refresh token in redis
-            const savedToken = await client.get(`refresh:${userId}`);
-            if (!savedToken || savedToken !== refreshToken) {
-                return res.status(StatusCodes.UNAUTHORIZED).json({
-                    status: CommonMessages.FALSE,
-                    message: "Refresh token expired / revoked"
-                });
-            }
-
-            //  issue new access token
-            const newAccessToken = jwt.sign({ id: userId }, process.env.JWT_ACCESS_KEY, {
-                expiresIn: process.env.ACCESS_TOKEN_EXP || "15m",
+        // verify refresh token
+        let payload;
+        try {
+            payload = jwt.verify(refreshToken, process.env.JWT_REFRESH_KEY);
+        } catch (err) {
+            return res.status(StatusCodes.UNAUTHORIZED).json({
+                status: CommonMessages.FALSE,
+                message: AuthConstants.INVALID_REFRESH
             });
+        }
 
-            return res.status(StatusCodes.OK).json({
-                status: CommonMessages.TRUE,
-                message: "New access token generated",
-                data: { accessToken: newAccessToken }
+        const userId = payload.id;
+        const refreshKey = `refresh:${userId}`;
+
+        // check token in redis
+        let savedToken;
+        try {
+            savedToken = await client.get(refreshKey);
+        } catch (err) {
+            logger.error(err, AuthConstants.READ_REFRESH);
+            return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+                status: CommonMessages.FALSE,
+                message: AuthConstants.READ_REFRESH
             });
+        }
+
+        if (!savedToken || savedToken !== refreshToken) {
+            return res.status(StatusCodes.UNAUTHORIZED).json({
+                status: CommonMessages.FALSE,
+                message: AuthConstants.REFRESH_EXPIRED
+            });
+        }
+
+        // generate new access token
+        const newAccessToken = jwt.sign(
+            { id: userId },
+            process.env.JWT_ACCESS_KEY,
+            { expiresIn: process.env.ACCESS_TOKEN_EXP || "15m" }
+        );
+
+        return res.status(StatusCodes.OK).json({
+            status: CommonMessages.TRUE,
+            message: AuthConstants.REFRESH_SUCCESS,
+            data: { accessToken: newAccessToken }
         });
 
-    } catch (error) {
-        console.error("refreshAccessToken error:", error);
+    } catch (err) {
+        logger.error(err, AuthConstants.REFRESH_LOG_API);
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
             status: CommonMessages.FALSE,
-            message: "Server error"
+            message: CommonMessages.SERVER_ERROR
         });
     }
 };
 
+// =================================== SET USER ROLE =============================//
+
 const setMyRole = async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { role } = req.body;
+    try {
+        const userId = req.id;
+        const { role } = req.body;
 
-    if (!role) {
-      return res.status(StatusCodes.BAD_REQUEST).json({
-        status: false,
-        message: "Role is required",
-      });
+        if (!role) {
+            return res.status(StatusCodes.BAD_REQUEST).json({
+                status: CommonMessages.FALSE,
+                message: AuthConstants.ROLE_REQUIRED,
+            });
+        }
+
+        if (!AuthConstants.ALLOWED_ROLES.includes(role)) {
+            return res.status(StatusCodes.BAD_REQUEST).json({
+                status: CommonMessages.FALSE,
+                message: AuthConstants.INVALID_ROLE,
+            });
+        }
+
+        const updatedUser = await UserData.findByIdAndUpdate(
+            userId,
+            { $set: { role } },
+            { new: true, projection: { role: 1 } }
+        ).lean();
+
+        if (!updatedUser) {
+            return res.status(StatusCodes.NOT_FOUND).json({
+                status: CommonMessages.FALSE,
+                message: AuthConstants.USER_NOT_FOUND,
+            });
+        }
+
+        return res.status(StatusCodes.OK).json({
+            status: CommonMessages.TRUE,
+            message: AuthConstants.ROLE_SUCCESS,
+            role: updatedUser.role,
+        });
+
+    } catch (err) {
+        logger.error(err, AuthConstants.ROLE_LOG_API);
+        return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+            status: CommonMessages.FALSE,
+            message: CommonMessages.SERVER_ERROR,
+        });
     }
-
-    const allowedRoles = ["transporter","truckOwner"];
-    if (!allowedRoles.includes(role)) {
-      return res.status(StatusCodes.BAD_REQUEST).json({
-        status: false,
-        message: "Invalid role. Allowed roles are transporter & truckowner",
-      });
-    }
-
-    const updatedUser = await UserData.findByIdAndUpdate(
-      userId,
-      { $set: { role } },
-      { new: true }
-    ).lean();
-
-    if (!updatedUser) {
-      return res.status(StatusCodes.NOT_FOUND).json({
-        status: false,
-        message: "User not found",
-      });
-    }
-
-    return res.status(StatusCodes.OK).json({
-      status: true,
-      message: "User role updated successfully",
-      data: updatedUser,
-    });
-  } catch (error) {
-    console.log("setUserRole error:", error);
-    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
-      status: false,
-      message: "Server error",
-    });
-  }
 };
 
-
+// ========================== LOGOUT =========================//
 
 const logout = async (req, res) => {
     try {
         const userId = req.id;
+        const { token } = req.body;
 
-        await client.del(`refresh:${userId}`);
+        if (!token) {
+            return res.status(StatusCodes.BAD_REQUEST).json({
+                status: CommonMessages.FALSE,
+                message: AuthConstants.TOKEN_REQUIRED
+            })
+        }
+
+        try {
+            await client.del(`refresh:${userId}`);
+        } catch (err) {
+            logger.error(err, AuthConstants.OTP_DEL_ERROR);
+        }
+
+        if (token) {
+            await UserData.updateOne(
+                { _id: userId },
+                { $pull: { fcmTokens: { token: token } } }
+            );
+        }
 
         return res.status(StatusCodes.OK).json({
             status: CommonMessages.TRUE,
-            message: "Logged out successfully"
+            message: AuthConstants.LOGOUT_SUCCESS
         });
 
     } catch (err) {
+
+        logger.error(err, AuthConstants.LOGOUT_LOG_API)
         return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
             status: CommonMessages.FALSE,
-            message: "Server error"
+            message: CommonMessages.SERVER_ERROR
         });
     }
 };
 
 
-module.exports = { sendOTP, verifyOTP, refreshAccessToken, logout,setMyRole }
+
+module.exports = { sendOTP, verifyOTP, refreshAccessToken, logout, setMyRole }

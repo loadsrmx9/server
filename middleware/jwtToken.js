@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { StatusCodes, CommonMessages } = require('../constants/constants');
+const { StatusCodes, CommonMessages } = require('../constants/common.constants');
 
 const jwtAuth = (req, res, next) => {
     try {

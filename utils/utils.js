@@ -1,5 +1,6 @@
 
-const { CommonMessages } = require('../constants/constants');
+const AuthConstants = require('../constants/auth.constants');
+const { CommonMessages } = require('../constants/common.constants');
 
 //6-digit otp generation
 const GenerateOTP = () => {
@@ -19,6 +20,9 @@ const ValidateLoadInput = async (body, requiredFields, client) => {
         });
     }
 
+    if (body.phone && !/^\d{10}$/.test(body.phone)) {
+        errors.phone = CommonMessages.INVALID_MOBILE;
+    }
 
     if (body.receiverNo && !/^\d{10}$/.test(body.receiverNo)) {
         errors.receiverNo = CommonMessages.INVALID_MOBILE;
@@ -29,13 +33,34 @@ const ValidateLoadInput = async (body, requiredFields, client) => {
     }
 
     if (body.otp && body.phone && client) {
-        const key = `otp:${body.phone}`;
+        const formattedPhone = AuthConstants.IND_FORMAT(body.phone);
+        const key = `otp:${formattedPhone}`;
         const storedOtp = await client.get(key);
 
         if (!storedOtp) {
             errors.otp = CommonMessages.OTP_EXPIRED;
         } else if (storedOtp !== body.otp) {
             errors.otp = CommonMessages.OTP_INVALID;
+        }
+    }
+
+    if (body.scheduleDate && !errors.scheduleDate) {
+        // user selected date (day start)
+        const selected = new Date(body.scheduleDate + "T00:00:00.000Z");
+
+        // today (day start)
+        const today = new Date();
+        const todayStartUTC = new Date(Date.UTC(
+            today.getUTCFullYear(),
+            today.getUTCMonth(),
+            today.getUTCDate(),
+            0, 0, 0, 0
+        ));
+
+        // past date not allowed
+        if (selected < todayStartUTC) {
+            errors.scheduleDate = "Past date not allowed";
+            // or: errors.scheduleDate = CommonMessages.INVALID_DATE;
         }
     }
 
@@ -76,7 +101,6 @@ const ValidateLoadInput = async (body, requiredFields, client) => {
         }
     }
 
-
     return {
         errors,
         scheduleUTC: body.scheduleDateTime ? new Date(body.scheduleDateTime) : null,
@@ -89,7 +113,17 @@ const ResponseModify = (load) => {
         ? load.toObject()
         : load;
 
-    const { viewedBy, ...cleanLoad } = loadObj;
+    const {
+        viewedBy,
+        receiverNo,
+        receiverName,
+        LoadImage,
+        rejectionReason,
+        reportCount,
+        isBlocked,
+        ...cleanLoad
+    } = loadObj;
+    
     const responseData = {
         ...cleanLoad,
 
@@ -108,11 +142,14 @@ const ResponseModify = (load) => {
 
 const mapLoadListItem = (load) => ({
     loadId: load._id,
-    fromAddress: load.from?.address,
-    toAddress: load.to?.address,
+    fromCity: load.from?.city,
+    toCity: load.to?.city,
     amount: load.amount,
     loadType: load.loadType,
     capacity: load.capacity,
+    bodyType: load.bodyType,
+    wheelers: load.wheelers,
+    truckType: load.truckType,
     createdAt: load.createdAt,
     viewCount: load.viewedBy.length
 });
@@ -120,11 +157,14 @@ const mapLoadListItem = (load) => ({
 const mapSearchLoadItem = (load) => ({
     loadId: load._id,
 
-    fromAddress: load.from?.address,
-    toAddress: load.to?.address,
+    fromCity: load.from?.city,
+    toCity: load.to?.city,
 
     amount: load.amount,
     loadType: load.loadType,
+    bodyType: load.bodyType,
+    wheelers: load.wheelers,
+    truckType: load.truckType,
     capacity: load.capacity,
     createdAt: load.createdAt,
 
